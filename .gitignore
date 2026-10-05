@@ -1,0 +1,28 @@
+# Environments
+venv/
+env/
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# IDEs
+.vscode/
+.idea/
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Data files (optional depending on whether you want to track them, but usually they are too large for git, especially .tif and .keras files)
+# For now, I'll allow the specific models if they fit, but let's exclude the data directory by default if it contains large files, or just exclude large extensions.
+*.tif
+*.keras
+# Urban_Sprawl_XGB.json is 2.5MB so it's fine, but .keras is small too (149KB). The .tif is 111KB. 
+# They are small enough for this specific project. I will uncomment them if the user wants them tracked.
