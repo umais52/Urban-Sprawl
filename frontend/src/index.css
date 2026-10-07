@@ -1,0 +1,89 @@
+/* ═══════════════════════════════════════════════════════════════════════════
+   Tailwind CSS v4 — CSS-first configuration
+   Urban Sprawl / Aks-e-Shajr CDX
+   ═══════════════════════════════════════════════════════════════════════════ */
+@import "tailwindcss";
+
+/* ── Custom theme tokens ─────────────────────────────────────────────────── */
+@theme {
+  /* Neon-green accent palette */
+  --color-neon: #39ff14;
+  --color-neon-dim: #39ff1480;
+  --color-neon-glow: #39ff1433;
+
+  /* Dark background tiers */
+  --color-surface-0: #050505;
+  --color-surface-1: #0a0a0f;
+  --color-surface-2: #12121a;
+
+  /* Font stack */
+  --font-sans: "Inter", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", "Cascadia Code", ui-monospace, monospace;
+}
+
+/* ── Global resets ───────────────────────────────────────────────────────── */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+  background: var(--color-surface-0);
+  color: #e5e7eb;
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ── Mapbox GL overrides (keep controls consistent with dark theme) ──────── */
+.mapboxgl-ctrl-group {
+  background: rgba(0, 0, 0, 0.65) !important;
+  border: 1px solid rgba(57, 255, 20, 0.15) !important;
+  backdrop-filter: blur(12px);
+  border-radius: 10px !important;
+}
+
+.mapboxgl-ctrl-group button {
+  border-color: rgba(255, 255, 255, 0.06) !important;
+}
+
+.mapboxgl-ctrl-group button + button {
+  border-top-color: rgba(255, 255, 255, 0.06) !important;
+}
+
+.mapboxgl-ctrl-group button span {
+  filter: invert(1) brightness(1.8);
+}
+
+.mapboxgl-ctrl-scale {
+  background: rgba(0, 0, 0, 0.5) !important;
+  color: rgba(57, 255, 20, 0.7) !important;
+  border-color: rgba(57, 255, 20, 0.25) !important;
+  font-family: var(--font-mono);
+  font-size: 10px !important;
+  border-radius: 4px !important;
+  backdrop-filter: blur(8px);
+}
+
+/* ── Scrollbar (thin, neon-accented) ──────────────────────────────────────── */
+::-webkit-scrollbar {
+  width: 4px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(57, 255, 20, 0.2);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(57, 255, 20, 0.4);
+}
