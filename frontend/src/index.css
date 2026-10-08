@@ -73,6 +73,25 @@ body,
   backdrop-filter: blur(8px);
 }
 
+/* ── Ensure react-map-gl v8 children wrapper does not swallow canvas mouse/touch events ── */
+div[mapboxgl-children] {
+  pointer-events: none;
+}
+
+div[mapboxgl-children] > * {
+  pointer-events: auto;
+}
+
+/* ── Mapbox Draw Controls ── */
+.mapboxgl-ctrl-top-right {
+  z-index: 10;
+}
+
+.mapbox-gl-draw_ctrl-draw-btn {
+  cursor: pointer;
+  pointer-events: auto;
+}
+
 /* ── Scrollbar (thin, neon-accented) ──────────────────────────────────────── */
 ::-webkit-scrollbar {
   width: 4px;

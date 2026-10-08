@@ -1,7 +1,8 @@
 /**
  * Component barrel export
  * =======================
- * Import all public components from here:
- *   import { MapInterface } from "@/components";
+ * Import public components from here:
+ *   import { MapInterface, DrawControl } from "@/components";
  */
 export { default as MapInterface } from "./MapInterface";
+export { default as DrawControl } from "./DrawControl";

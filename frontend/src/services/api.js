@@ -19,6 +19,9 @@ const api = axios.create({
 /** CDX Point 8 – Run the fusion forecast */
 export const postForecast = (payload) => api.post("/forecast", payload);
 
+/** CDX Point 8 – Fetch GeoJSON forecast growth polygon layer */
+export const getForecastLayer = () => api.get("/forecast_layer");
+
 /** CDX Point 3 – Fetch Markov demand matrix */
 export const getDemand = () => api.get("/demand");
 

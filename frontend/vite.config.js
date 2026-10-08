@@ -4,6 +4,11 @@ import { defineConfig } from 'vite'
 
 // https://vite.dev/config/
 export default defineConfig({
+  resolve: {
+    alias: [
+      { find: /^react-map-gl$/, replacement: 'react-map-gl/mapbox' },
+    ],
+  },
   plugins: [
     tailwindcss(),
     react(),

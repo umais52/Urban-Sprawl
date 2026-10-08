@@ -456,6 +456,160 @@ def forecast(payload: ForecastRequest) -> ForecastResponse:
 
 
 # ---------------------------------------------------------------------------
+# CDX POINT 8 -- Forecast Vector Layer (GeoJSON FeatureCollection)
+# ---------------------------------------------------------------------------
+@app.get("/api/v1/forecast_layer")
+def get_forecast_layer() -> dict[str, Any]:
+    """
+    Returns simulated GeoJSON FeatureCollection containing predicted urban growth
+    patches across major Karachi sprawl frontiers for 2025:
+    - Bahria Town Karachi (M-9 Corridor)
+    - DHA City Karachi (DCK Eastern Expansion)
+    - Northern Bypass / Gadap Valley Corridor
+    - Scheme 33 & Maymar Infill Sector
+    - Hawkesbay Scheme 42 Coastal Suburb
+    """
+    return {
+        "type": "FeatureCollection",
+        "metadata": {
+            "title": "Aks-e-Shajr CDX Urban Sprawl Forecast 2025",
+            "city": "Karachi",
+            "projection_year": 2025,
+            "fusion_model": "CDX (CNN-LSTM + XGBoost + CA)",
+            "mean_p_urban": 0.814,
+            "total_features": 5,
+        },
+        "features": [
+            {
+                "type": "Feature",
+                "id": "patch_btk_m9",
+                "properties": {
+                    "name": "Bahria Town Urban Growth Cluster",
+                    "corridor": "M-9 Super Highway Corridor",
+                    "p_urban": 0.892,
+                    "risk_level": "High Sprawl",
+                    "area_km2": 16.4,
+                    "projected_growth_rate": "+18.2%",
+                },
+                "geometry": {
+                    "type": "Polygon",
+                    "coordinates": [
+                        [
+                            [67.310, 25.005],
+                            [67.355, 25.000],
+                            [67.368, 25.042],
+                            [67.322, 25.050],
+                            [67.305, 25.025],
+                            [67.310, 25.005],
+                        ]
+                    ],
+                },
+            },
+            {
+                "type": "Feature",
+                "id": "patch_dha_city",
+                "properties": {
+                    "name": "DHA City Karachi Expansion Zone",
+                    "corridor": "M-9 Eastern Frontier",
+                    "p_urban": 0.835,
+                    "risk_level": "High Sprawl",
+                    "area_km2": 21.0,
+                    "projected_growth_rate": "+22.5%",
+                },
+                "geometry": {
+                    "type": "Polygon",
+                    "coordinates": [
+                        [
+                            [67.420, 25.050],
+                            [67.478, 25.045],
+                            [67.485, 25.092],
+                            [67.430, 25.098],
+                            [67.415, 25.075],
+                            [67.420, 25.050],
+                        ]
+                    ],
+                },
+            },
+            {
+                "type": "Feature",
+                "id": "patch_northern_bypass",
+                "properties": {
+                    "name": "Northern Bypass / Gadap Valley Corridor",
+                    "corridor": "M-10 / Northern Bypass",
+                    "p_urban": 0.778,
+                    "risk_level": "Moderate-High Sprawl",
+                    "area_km2": 12.8,
+                    "projected_growth_rate": "+15.1%",
+                },
+                "geometry": {
+                    "type": "Polygon",
+                    "coordinates": [
+                        [
+                            [67.075, 25.015],
+                            [67.135, 25.012],
+                            [67.142, 25.052],
+                            [67.085, 25.058],
+                            [67.068, 25.035],
+                            [67.075, 25.015],
+                        ]
+                    ],
+                },
+            },
+            {
+                "type": "Feature",
+                "id": "patch_scheme_33",
+                "properties": {
+                    "name": "Scheme 33 & Maymar Infill Sector",
+                    "corridor": "University Road / Maymar Extension",
+                    "p_urban": 0.812,
+                    "risk_level": "High Infill",
+                    "area_km2": 9.5,
+                    "projected_growth_rate": "+11.4%",
+                },
+                "geometry": {
+                    "type": "Polygon",
+                    "coordinates": [
+                        [
+                            [67.120, 24.960],
+                            [67.165, 24.958],
+                            [67.170, 24.995],
+                            [67.125, 24.998],
+                            [67.115, 24.978],
+                            [67.120, 24.960],
+                        ]
+                    ],
+                },
+            },
+            {
+                "type": "Feature",
+                "id": "patch_hawkesbay_scheme42",
+                "properties": {
+                    "name": "Hawkesbay Scheme 42 Coastal Cluster",
+                    "corridor": "Western Coastal Highway",
+                    "p_urban": 0.724,
+                    "risk_level": "Moderate Sprawl",
+                    "area_km2": 8.2,
+                    "projected_growth_rate": "+9.7%",
+                },
+                "geometry": {
+                    "type": "Polygon",
+                    "coordinates": [
+                        [
+                            [66.855, 24.885],
+                            [66.905, 24.880],
+                            [66.912, 24.918],
+                            [66.862, 24.922],
+                            [66.850, 24.902],
+                            [66.855, 24.885],
+                        ]
+                    ],
+                },
+            },
+        ],
+    }
+
+
+# ---------------------------------------------------------------------------
 # CDX POINT 3 -- Markov Demand Estimation schemas & helpers
 # ---------------------------------------------------------------------------
 
@@ -611,19 +765,17 @@ class SimulateRoadRequest(BaseModel):
     """
     Payload for the /api/v1/simulate_road (What-If Sandbox) endpoint.
 
-    Accepts a GeoJSON LineString-style coordinate list representing a
-    user-drawn road, plus the current baseline P_urban to update.
-    Coordinates are interpreted as fractional [0, 1] positions within the
-    simulation grid so no CRS transform is needed at this stage.
+    Accepts:
+    - `coordinates`: list of {x, y} or [lng, lat] vertices.
+    - `geojson`: GeoJSON Feature/FeatureCollection/LineString.
     """
-    coordinates: list[GeoJSONCoordinate] = Field(
-        ...,
-        min_length=2,
-        description=(
-            "Ordered list of road vertices as (x, y) pairs. "
-            "x and y should be fractional positions in [0, 1] "
-            "(0 = left/top edge, 1 = right/bottom edge of the tile)."
-        ),
+    coordinates: list[Any] | None = Field(
+        default=None,
+        description="Road vertices as (x, y) pairs or [lng, lat] pairs.",
+    )
+    geojson: dict[str, Any] | None = Field(
+        default=None,
+        description="GeoJSON Feature or FeatureCollection representing user-drawn road.",
     )
     baseline_p_urban: float = Field(
         default=0.45,
@@ -658,6 +810,45 @@ class SimulateRoadResponse(BaseModel):
 # ---------------------------------------------------------------------------
 # What-If Sandbox -- Helpers
 # ---------------------------------------------------------------------------
+
+def _normalize_road_coords(raw_coords: list[Any]) -> list[GeoJSONCoordinate]:
+    """Parse and normalize raw coordinates into [0, 1] grid space."""
+    parsed: list[GeoJSONCoordinate] = []
+    for c in raw_coords:
+        if isinstance(c, (list, tuple)) and len(c) >= 2:
+            parsed.append(GeoJSONCoordinate(x=float(c[0]), y=float(c[1])))
+        elif isinstance(c, dict):
+            if "x" in c and "y" in c:
+                parsed.append(GeoJSONCoordinate(x=float(c["x"]), y=float(c["y"])))
+            elif "lng" in c and "lat" in c:
+                parsed.append(GeoJSONCoordinate(x=float(c["lng"]), y=float(c["lat"])))
+        elif hasattr(c, "x") and hasattr(c, "y"):
+            parsed.append(GeoJSONCoordinate(x=float(c.x), y=float(c.y)))
+
+    if len(parsed) < 2:
+        return parsed
+
+    xs = [pt.x for pt in parsed]
+    ys = [pt.y for pt in parsed]
+
+    # If coordinates are outside [0, 1] (e.g. real longitude/latitude degrees in Karachi)
+    if max(xs) > 1.0 or max(ys) > 1.0 or min(xs) < 0.0 or min(ys) < 0.0:
+        min_x, max_x = min(xs), max(xs)
+        min_y, max_y = min(ys), max(ys)
+        span_x = max(max_x - min_x, 1e-6)
+        span_y = max(max_y - min_y, 1e-6)
+        pad = 0.08  # 8% margin
+        scale = 1.0 - 2.0 * pad
+        return [
+            GeoJSONCoordinate(
+                x=pad + scale * ((pt.x - min_x) / span_x),
+                y=pad + scale * ((pt.y - min_y) / span_y),
+            )
+            for pt in parsed
+        ]
+
+    return parsed
+
 
 def _rasterise_road(
     coordinates: list[GeoJSONCoordinate],
@@ -760,17 +951,44 @@ def simulate_road(payload: SimulateRoadRequest) -> SimulateRoadResponse:
     """
     H, W = payload.grid_h, payload.grid_w
 
+    raw_coords: list[Any] = []
+    if payload.coordinates:
+        raw_coords = payload.coordinates
+    elif payload.geojson:
+        g = payload.geojson
+        if g.get("type") == "FeatureCollection" and g.get("features"):
+            for feat in g["features"]:
+                geom = feat.get("geometry", {})
+                if geom.get("type") == "LineString":
+                    raw_coords.extend(geom.get("coordinates", []))
+        elif g.get("type") == "Feature":
+            geom = g.get("geometry", {})
+            if geom.get("type") == "LineString":
+                raw_coords = geom.get("coordinates", [])
+        elif g.get("type") == "LineString":
+            raw_coords = g.get("coordinates", [])
+
+    if len(raw_coords) < 2:
+        raise HTTPException(
+            status_code=422,
+            detail="At least 2 coordinate vertices are required to simulate a road.",
+        )
+
+    norm_coords = _normalize_road_coords(raw_coords)
+    if len(norm_coords) < 2:
+        raise HTTPException(
+            status_code=422,
+            detail="Could not extract at least 2 valid coordinates from the road.",
+        )
+
     # Step 1: Rasterise the user-drawn road onto the grid
-    road_mask = _rasterise_road(payload.coordinates, H, W)
+    road_mask = _rasterise_road(norm_coords, H, W)
     road_pixel_count = int(road_mask.sum())
 
     if road_pixel_count == 0:
         raise HTTPException(
             status_code=422,
-            detail=(
-                "No road pixels were rasterised onto the grid. "
-                "Check that coordinates are fractional values in [0, 1]."
-            ),
+            detail="No road pixels could be rasterised onto the grid.",
         )
 
     # Step 2: Compute Dist_Roads via SciPy distance_transform_edt
