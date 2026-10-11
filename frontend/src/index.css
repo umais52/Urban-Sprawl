@@ -55,7 +55,7 @@ body,
   border-color: rgba(255, 255, 255, 0.06) !important;
 }
 
-.mapboxgl-ctrl-group button + button {
+.mapboxgl-ctrl-group button+button {
   border-top-color: rgba(255, 255, 255, 0.06) !important;
 }
 
@@ -78,7 +78,7 @@ div[mapboxgl-children] {
   pointer-events: none;
 }
 
-div[mapboxgl-children] > * {
+div[mapboxgl-children]>* {
   pointer-events: auto;
 }
 
@@ -96,13 +96,16 @@ div[mapboxgl-children] > * {
 ::-webkit-scrollbar {
   width: 4px;
 }
+
 ::-webkit-scrollbar-track {
   background: transparent;
 }
+
 ::-webkit-scrollbar-thumb {
   background: rgba(57, 255, 20, 0.2);
   border-radius: 4px;
 }
+
 ::-webkit-scrollbar-thumb:hover {
   background: rgba(57, 255, 20, 0.4);
 }

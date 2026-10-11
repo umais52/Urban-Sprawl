@@ -24,16 +24,19 @@ import {
   Activity,
   AlertTriangle,
   ChevronRight,
+  Clock,
   Cpu,
   Layers,
   MapPin,
+  Pause,
+  Play,
   Radar,
   Route,
   Satellite,
   Zap,
 } from "lucide-react";
 
-import { getForecastLayer, getHealth } from "../services/api";
+import { getForecastLayer, getHealth, getHistory } from "../services/api";
 
 
 // ---------------------------------------------------------------------------
@@ -60,14 +63,14 @@ const KARACHI = {
 };
 
 // ---------------------------------------------------------------------------
-// CDX Forecast Polygon Layer Styles (Neon-green #39ff14, 0.5 opacity fill)
+// CDX Forecast Polygon Layer Styles (Neon-red #ff3344, 0.55 opacity fill)
 // ---------------------------------------------------------------------------
 const forecastFillLayer = {
   id: "forecast-polygons-fill",
   type: "fill",
   paint: {
-    "fill-color": "#39ff14",
-    "fill-opacity": 0.5,
+    "fill-color": "#ff3344",
+    "fill-opacity": 0.55,
   },
 };
 
@@ -75,11 +78,95 @@ const forecastOutlineLayer = {
   id: "forecast-polygons-outline",
   type: "line",
   paint: {
+    "line-color": "#ff3344",
+    "line-width": 2,
+    "line-opacity": 0.95,
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Temporal History Layer Styles (Neon-green #39ff14 with smooth transitions)
+// ---------------------------------------------------------------------------
+const historyFillLayer = {
+  id: "history-polygons-fill",
+  type: "fill",
+  paint: {
+    "fill-color": "#39ff14",
+    "fill-opacity": 0.5,
+    "fill-color-transition": { duration: 600, delay: 0 },
+    "fill-opacity-transition": { duration: 600, delay: 0 },
+  },
+};
+
+const historyOutlineLayer = {
+  id: "history-polygons-outline",
+  type: "line",
+  paint: {
     "line-color": "#39ff14",
+    "line-width": 2,
+    "line-opacity": 0.9,
+    "line-opacity-transition": { duration: 600, delay: 0 },
+    "line-width-transition": { duration: 600, delay: 0 },
+  },
+};
+
+// ---------------------------------------------------------------------------
+// What-If Simulation Delta Layer Styles (Neon-blue #00e5ff, 0.6 opacity fill)
+// ---------------------------------------------------------------------------
+const simulationFillLayer = {
+  id: "simulation-polygons-fill",
+  type: "fill",
+  paint: {
+    "fill-color": "#00e5ff",
+    "fill-opacity": 0.6,
+  },
+};
+
+const simulationOutlineLayer = {
+  id: "simulation-polygons-outline",
+  type: "line",
+  paint: {
+    "line-color": "#00e5ff",
     "line-width": 2,
     "line-opacity": 0.9,
   },
 };
+
+// ---------------------------------------------------------------------------
+// Helper: Generate polygon buffer ring around road coordinates for delta
+// ---------------------------------------------------------------------------
+function bufferLineCoordinates(coords, bufferDeg = 0.012) {
+  if (!coords || coords.length < 2) return [];
+  const left = [];
+  const right = [];
+
+  for (let i = 0; i < coords.length; i++) {
+    let dx = 0;
+    let dy = 0;
+
+    if (i === 0) {
+      dx = coords[1][0] - coords[0][0];
+      dy = coords[1][1] - coords[0][1];
+    } else if (i === coords.length - 1) {
+      dx = coords[i][0] - coords[i - 1][0];
+      dy = coords[i][1] - coords[i - 1][1];
+    } else {
+      dx = coords[i + 1][0] - coords[i - 1][0];
+      dy = coords[i + 1][1] - coords[i - 1][1];
+    }
+
+    const len = Math.sqrt(dx * dx + dy * dy) || 1e-6;
+    const nx = -dy / len;
+    const ny = dx / len;
+
+    left.push([coords[i][0] + nx * bufferDeg, coords[i][1] + ny * bufferDeg]);
+    right.push([coords[i][0] - nx * bufferDeg, coords[i][1] - ny * bufferDeg]);
+  }
+
+  const ring = [...left, ...right.reverse()];
+  ring.push(ring[0]);
+  return ring;
+}
 
 // ---------------------------------------------------------------------------
 // Component
@@ -99,10 +186,16 @@ export default function MapInterface() {
   const [forecastData, setForecastData] = useState(null);
   const [popupInfo, setPopupInfo] = useState(null);
 
+  // Temporal Time-Lapse (1995 - 2025) state
+  const [currentYear, setCurrentYear] = useState(2020);
+  const [historyData, setHistoryData] = useState(null);
+  const [isPlaying, setIsPlaying] = useState(false);
+
   // What-If Sandbox (Drawn Road) state
   const [drawnRoad, setDrawnRoad] = useState(null);
   const [simulating, setSimulating] = useState(false);
   const [simulationResult, setSimulationResult] = useState(null);
+  const [simulationData, setSimulationData] = useState(null);
 
   // ── Health ping on mount ────────────────────────────────────────────────
   useEffect(() => {
@@ -111,16 +204,45 @@ export default function MapInterface() {
       .catch(() => setBackendStatus("offline"));
   }, []);
 
+  // ── Fetch Temporal History layer on currentYear change ───────────────────
+  useEffect(() => {
+    let isSubscribed = true;
+    getHistory(currentYear)
+      .then(({ data }) => {
+        if (isSubscribed) {
+          setHistoryData(data);
+        }
+      })
+      .catch((err) => {
+        console.error(`[History ${currentYear}]`, err);
+      });
+
+    return () => {
+      isSubscribed = false;
+    };
+  }, [currentYear]);
+
+  // ── Auto-play time-lapse playback loop ───────────────────────────────────
+  useEffect(() => {
+    if (!isPlaying) return;
+    const interval = setInterval(() => {
+      setCurrentYear((prev) => (prev >= 2025 ? 1995 : prev + 5));
+    }, 1500);
+    return () => clearInterval(interval);
+  }, [isPlaying]);
+
   // ── Forecast handler (Fetches GeoJSON from /api/v1/forecast_layer) ──────
   const fetchForecast = useCallback(async () => {
     setForecasting(true);
     setForecastResult(null);
     setPopupInfo(null);
+    setHistoryData(null); // Clear history layer so ONLY real forecast polygons are visible
     try {
       const { data } = await getForecastLayer();
       setForecastData(data);
 
       const totalArea =
+        data.metadata?.total_area_km2 ??
         data.features?.reduce(
           (acc, f) => acc + (f.properties?.area_km2 || 0),
           0
@@ -130,11 +252,11 @@ export default function MapInterface() {
       setForecastResult({
         p_urban: meanP,
         urban_class: "Urban",
-        l_fused: 0.916258,
-        z_xgb: 0.753772,
+        l_fused: data.metadata?.mean_l_fused ?? 0.916258,
+        z_xgb: data.metadata?.mean_z_xgb ?? 0.753772,
         patch_count: data.features?.length || 5,
-        total_area_km2: totalArea.toFixed(1),
-        target_year: data.metadata?.projection_year || 2025,
+        total_area_km2: Number(totalArea).toFixed(1),
+        target_year: data.metadata?.projection_year || 2030,
       });
 
       // Smoothly animate camera to frame the Karachi eastern/northern growth frontier
@@ -159,17 +281,20 @@ export default function MapInterface() {
     const feature = e.features && e.features.length > 0 ? e.features[0] : null;
     setDrawnRoad(feature);
     setSimulationResult(null);
+    setSimulationData(null);
   }, []);
 
   const handleDrawUpdate = useCallback((e) => {
     const feature = e.features && e.features.length > 0 ? e.features[0] : null;
     setDrawnRoad(feature);
     setSimulationResult(null);
+    setSimulationData(null);
   }, []);
 
   const handleDrawDelete = useCallback(() => {
     setDrawnRoad(null);
     setSimulationResult(null);
+    setSimulationData(null);
   }, []);
 
   // ── What-If Sandbox: Simulate Road Infrastructure ───────────────────────
@@ -196,18 +321,42 @@ export default function MapInterface() {
       const data = response.data;
       setSimulationResult(data);
 
-      alert(
-        `What-If Road Simulation Result:\n` +
-        `-----------------------------------------\n` +
-        `Updated P(Urban): ${(data.updated_p_urban * 100).toFixed(2)}%\n` +
-        `Delta P(Urban): +${(data.delta_p_urban * 100).toFixed(2)}%\n` +
-        `Affected Area: ${data.affected_area_cells} cells\n` +
-        `Road Pixels: ${data.road_pixel_count}\n` +
-        `Influence Radius: ${data.influence_radius_cells} cells`
-      );
+      // Format as GeoJSON FeatureCollection if not already one
+      let geojson = data;
+      if (data && (data.type === "FeatureCollection" || data.type === "Feature")) {
+        geojson = data;
+      } else if (data?.geojson && (data.geojson.type === "FeatureCollection" || data.geojson.type === "Feature")) {
+        geojson = data.geojson;
+      } else if (drawnRoad?.geometry?.coordinates) {
+        const polyRing = bufferLineCoordinates(drawnRoad.geometry.coordinates, 0.012);
+        geojson = {
+          type: "FeatureCollection",
+          metadata: { ...data },
+          features: [
+            {
+              type: "Feature",
+              id: "simulated_road_delta_polygon",
+              properties: {
+                name: "Simulated Urban Growth Delta",
+                corridor: "Proposed Road Infrastructure Corridor",
+                delta_p_urban: data.delta_p_urban,
+                updated_p_urban: data.updated_p_urban,
+                affected_area_cells: data.affected_area_cells,
+                road_pixel_count: data.road_pixel_count,
+                influence_radius_cells: data.influence_radius_cells,
+              },
+              geometry: {
+                type: "Polygon",
+                coordinates: [polyRing],
+              },
+            },
+          ],
+        };
+      }
+
+      setSimulationData(geojson);
     } catch (err) {
       console.error("[Simulate Road]", err);
-      alert(`Simulation Error: ${err.response?.data?.detail || err.message}`);
     } finally {
       setSimulating(false);
     }
@@ -216,11 +365,17 @@ export default function MapInterface() {
   // Map polygon click interaction
   const handleMapClick = useCallback((evt) => {
     const feature = evt.features && evt.features[0];
-    if (feature && feature.layer.id === "forecast-polygons-fill") {
+    if (
+      feature &&
+      (feature.layer.id === "forecast-polygons-fill" ||
+        feature.layer.id === "history-polygons-fill" ||
+        feature.layer.id === "simulation-polygons-fill")
+    ) {
       setPopupInfo({
         longitude: evt.lngLat.lng,
         latitude: evt.lngLat.lat,
         properties: feature.properties,
+        layerId: feature.layer.id,
       });
     } else {
       setPopupInfo(null);
@@ -236,7 +391,11 @@ export default function MapInterface() {
         {...viewState}
         onMove={(evt) => setViewState(evt.viewState)}
         onClick={handleMapClick}
-        interactiveLayerIds={["forecast-polygons-fill"]}
+        interactiveLayerIds={[
+          "forecast-polygons-fill",
+          "history-polygons-fill",
+          "simulation-polygons-fill",
+        ]}
         mapboxAccessToken={MAPBOX_TOKEN}
         mapStyle={ACTIVE_MAP_STYLE}
         style={{ width: "100%", height: "100%" }}
@@ -254,11 +413,27 @@ export default function MapInterface() {
           onDelete={handleDrawDelete}
         />
 
-        {/* ─── CDX Forecast Growth Polygons (Neon Green Fill & Outline) ── */}
+        {/* ─── Temporal Sprawl History Layer (Time-Lapse with transitions) ── */}
+        {historyData && (
+          <Source id="history-layer-source" type="geojson" data={historyData}>
+            <Layer {...historyFillLayer} />
+            <Layer {...historyOutlineLayer} />
+          </Source>
+        )}
+
+        {/* ─── CDX Forecast Growth Polygons (Neon Red Fill & Outline) ──── */}
         {forecastData && (
           <Source id="forecast-layer-source" type="geojson" data={forecastData}>
             <Layer {...forecastFillLayer} />
             <Layer {...forecastOutlineLayer} />
+          </Source>
+        )}
+
+        {/* ─── What-If Road Simulation Delta Layer (Neon Blue Fill) ──── */}
+        {simulationData && (
+          <Source id="simulation-layer-source" type="geojson" data={simulationData}>
+            <Layer {...simulationFillLayer} />
+            <Layer {...simulationOutlineLayer} />
           </Source>
         )}
 
@@ -272,38 +447,100 @@ export default function MapInterface() {
             closeButton={true}
             closeOnClick={false}
           >
-            <div className="rounded-lg bg-gray-950 p-3 text-xs text-white border border-green-500/40 shadow-xl max-w-xs">
-              <p className="font-bold text-green-400 text-sm">
-                {popupInfo.properties?.name}
-              </p>
+            <div className={`rounded-lg bg-gray-950 p-3 text-xs text-white border shadow-xl max-w-xs ${
+              popupInfo.layerId === "forecast-polygons-fill"
+                ? "border-red-500/50"
+                : popupInfo.layerId === "simulation-polygons-fill"
+                  ? "border-cyan-500/50"
+                  : "border-green-500/40"
+            }`}>
+              <div className="flex items-center justify-between gap-2">
+                <p className={`font-bold text-sm ${
+                  popupInfo.layerId === "forecast-polygons-fill"
+                    ? "text-red-400"
+                    : popupInfo.layerId === "simulation-polygons-fill"
+                      ? "text-cyan-400"
+                      : "text-green-400"
+                }`}>
+                  {popupInfo.properties?.name}
+                </p>
+                {popupInfo.layerId === "simulation-polygons-fill" ? (
+                  <span className="rounded bg-cyan-500/20 px-1.5 py-0.5 text-[9px] font-mono text-cyan-300 font-bold border border-cyan-500/30">
+                    What-If Delta
+                  </span>
+                ) : popupInfo.properties?.year ? (
+                  <span className="rounded bg-green-500/20 px-1.5 py-0.5 text-[9px] font-mono text-green-300 font-bold border border-green-500/30">
+                    {popupInfo.properties.year}
+                  </span>
+                ) : (
+                  <span className="rounded bg-red-500/20 px-1.5 py-0.5 text-[9px] font-mono text-red-300 font-bold border border-red-500/30">
+                    2030 Forecast
+                  </span>
+                )}
+              </div>
               <p className="text-gray-400 text-[11px] mt-0.5">
                 {popupInfo.properties?.corridor}
               </p>
+              {popupInfo.properties?.stage && (
+                <p className="text-[10px] text-green-400/80 font-mono mt-0.5">
+                  {popupInfo.properties.stage}
+                </p>
+              )}
               <div className="mt-2 grid grid-cols-2 gap-2 border-t border-white/10 pt-2 text-[10px]">
-                <div>
-                  <span className="text-gray-500">P(Urban):</span>{" "}
-                  <span className="font-mono font-bold text-green-400">
-                    {(Number(popupInfo.properties?.p_urban) * 100).toFixed(1)}%
-                  </span>
-                </div>
-                <div>
-                  <span className="text-gray-500">Area:</span>{" "}
-                  <span className="font-mono text-gray-200">
-                    {popupInfo.properties?.area_km2} km²
-                  </span>
-                </div>
-                <div>
-                  <span className="text-gray-500">Growth:</span>{" "}
-                  <span className="font-mono text-yellow-400">
-                    {popupInfo.properties?.projected_growth_rate}
-                  </span>
-                </div>
-                <div>
-                  <span className="text-gray-500">Risk:</span>{" "}
-                  <span className="text-red-400 font-medium">
-                    {popupInfo.properties?.risk_level}
-                  </span>
-                </div>
+                {popupInfo.properties?.p_urban !== undefined && (
+                  <div>
+                    <span className="text-gray-500">P(Urban):</span>{" "}
+                    <span className={`font-mono font-bold ${
+                      popupInfo.layerId === "forecast-polygons-fill"
+                        ? "text-red-400"
+                        : popupInfo.layerId === "simulation-polygons-fill"
+                          ? "text-cyan-400"
+                          : "text-green-400"
+                    }`}>
+                      {(Number(popupInfo.properties.p_urban) * 100).toFixed(1)}%
+                    </span>
+                  </div>
+                )}
+                {popupInfo.properties?.delta_p_urban !== undefined && (
+                  <div>
+                    <span className="text-gray-500">Delta Uplift:</span>{" "}
+                    <span className="font-mono text-cyan-400 font-bold">
+                      +{((Number(popupInfo.properties.delta_p_urban)) * 100).toFixed(2)}%
+                    </span>
+                  </div>
+                )}
+                {popupInfo.properties?.affected_area_cells !== undefined && (
+                  <div>
+                    <span className="text-gray-500">Impact Cells:</span>{" "}
+                    <span className="font-mono text-gray-200">
+                      {popupInfo.properties.affected_area_cells}
+                    </span>
+                  </div>
+                )}
+                {popupInfo.properties?.area_km2 !== undefined && (
+                  <div>
+                    <span className="text-gray-500">Area:</span>{" "}
+                    <span className="font-mono text-gray-200">
+                      {popupInfo.properties?.area_km2} km²
+                    </span>
+                  </div>
+                )}
+                {popupInfo.properties?.projected_growth_rate && (
+                  <div>
+                    <span className="text-gray-500">Growth:</span>{" "}
+                    <span className="font-mono text-yellow-400">
+                      {popupInfo.properties?.projected_growth_rate}
+                    </span>
+                  </div>
+                )}
+                {popupInfo.properties?.risk_level && (
+                  <div>
+                    <span className="text-gray-500">Risk:</span>{" "}
+                    <span className="text-red-400 font-medium">
+                      {popupInfo.properties?.risk_level}
+                    </span>
+                  </div>
+                )}
               </div>
             </div>
           </Popup>
@@ -476,37 +713,33 @@ export default function MapInterface() {
 
           {/* ── Forecast Result ──────────────────────────────────────── */}
           {forecastResult && !forecastResult.error && (
-            <div className="mt-4 rounded-lg border border-green-500/20
-                            bg-green-500/[0.04] p-3">
+            <div className="mt-4 rounded-lg border border-red-500/30
+                            bg-red-500/[0.05] p-3 shadow-lg shadow-red-500/5">
               <div className="flex items-center justify-between mb-2">
-                <p className="text-[10px] font-semibold uppercase tracking-widest text-green-400/80">
-                  Forecast 2025 Result
+                <p className="text-[10px] font-semibold uppercase tracking-widest text-red-400 font-bold">
+                  Forecast 2030 Result
                 </p>
-                <span className="flex items-center gap-1 text-[9px] font-mono text-green-400">
-                  <span className="h-1.5 w-1.5 rounded-full bg-green-400 animate-pulse" />
+                <span className="flex items-center gap-1 text-[9px] font-mono text-red-400">
+                  <span className="h-1.5 w-1.5 rounded-full bg-red-400 animate-pulse" />
                   Map Layer Active
                 </span>
               </div>
               <div className="grid grid-cols-2 gap-2">
                 <div>
                   <p className="text-[9px] text-gray-500">P(Urban)</p>
-                  <p className="font-mono text-lg font-bold text-green-400">
+                  <p className="font-mono text-lg font-bold text-red-400">
                     {(forecastResult.p_urban * 100).toFixed(1)}%
                   </p>
                 </div>
                 <div>
                   <p className="text-[9px] text-gray-500">Class</p>
-                  <p className={`font-mono text-lg font-bold ${
-                    forecastResult.urban_class === "Urban"
-                      ? "text-red-400"
-                      : "text-green-400"
-                  }`}>
+                  <p className="font-mono text-lg font-bold text-red-400">
                     {forecastResult.urban_class}
                   </p>
                 </div>
                 <div>
                   <p className="text-[9px] text-gray-500">Growth Clusters</p>
-                  <p className="font-mono text-xs text-green-400/90 font-semibold">
+                  <p className="font-mono text-xs text-red-400 font-semibold">
                     {forecastResult.patch_count} Zones
                   </p>
                 </div>
@@ -519,9 +752,9 @@ export default function MapInterface() {
               </div>
 
               {forecastData?.features && (
-                <div className="mt-2.5 border-t border-green-500/10 pt-2">
+                <div className="mt-2.5 border-t border-red-500/10 pt-2">
                   <p className="text-[9px] text-gray-400">
-                    Click any neon-green polygon on the map to inspect local corridor metrics.
+                    Click any neon-red polygon on the map to inspect local corridor metrics.
                   </p>
                 </div>
               )}
@@ -530,26 +763,39 @@ export default function MapInterface() {
 
           {/* ── Road Simulation Result ───────────────────────────────── */}
           {simulationResult && (
-            <div className="mt-4 rounded-lg border border-amber-500/30
-                            bg-amber-500/[0.05] p-3 shadow-lg shadow-amber-500/5">
+            <div className="mt-4 rounded-lg border border-cyan-500/30
+                            bg-cyan-500/[0.05] p-3 shadow-lg shadow-cyan-500/5">
               <div className="flex items-center justify-between mb-2">
-                <p className="text-[10px] font-semibold uppercase tracking-widest text-amber-400 font-bold">
+                <p className="text-[10px] font-semibold uppercase tracking-widest text-cyan-400 font-bold">
                   What-If Road Impact
                 </p>
-                <span className="text-[9px] font-mono font-bold text-amber-300">
-                  +{((simulationResult.delta_p_urban || 0) * 100).toFixed(2)}% Uplift
-                </span>
+                {simulationData ? (
+                  <span className="flex items-center gap-1 text-[9px] font-mono text-cyan-400">
+                    <span className="h-1.5 w-1.5 rounded-full bg-cyan-400 animate-pulse" />
+                    Delta Layer Active
+                  </span>
+                ) : (
+                  <span className="text-[9px] font-mono font-bold text-cyan-300">
+                    +{((simulationResult.delta_p_urban || 0) * 100).toFixed(2)}% Uplift
+                  </span>
+                )}
               </div>
               <div className="grid grid-cols-2 gap-2">
                 <div>
                   <p className="text-[9px] text-gray-500">Updated P(Urban)</p>
-                  <p className="font-mono text-base font-bold text-amber-400">
+                  <p className="font-mono text-base font-bold text-cyan-400">
                     {((simulationResult.updated_p_urban || 0) * 100).toFixed(1)}%
                   </p>
                 </div>
                 <div>
+                  <p className="text-[9px] text-gray-500">Delta Uplift</p>
+                  <p className="font-mono text-base font-bold text-cyan-300">
+                    +{((simulationResult.delta_p_urban || 0) * 100).toFixed(2)}%
+                  </p>
+                </div>
+                <div>
                   <p className="text-[9px] text-gray-500">Affected Area</p>
-                  <p className="font-mono text-base font-bold text-gray-200">
+                  <p className="font-mono text-xs text-gray-200">
                     {simulationResult.affected_area_cells} cells
                   </p>
                 </div>
@@ -559,13 +805,14 @@ export default function MapInterface() {
                     {simulationResult.road_pixel_count} px
                   </p>
                 </div>
-                <div>
-                  <p className="text-[9px] text-gray-500">Influence Radius</p>
-                  <p className="font-mono text-xs text-gray-300">
-                    {simulationResult.influence_radius_cells} cells
+              </div>
+              {simulationData && (
+                <div className="mt-2.5 border-t border-cyan-500/10 pt-2">
+                  <p className="text-[9px] text-gray-400">
+                    Click the neon-blue delta polygon on the map to inspect corridor growth impact.
                   </p>
                 </div>
-              </div>
+              )}
             </div>
           )}
 
@@ -578,7 +825,7 @@ export default function MapInterface() {
 
         {/* ── Footer / Forecast & Simulate Buttons ───────────────────── */}
         <div className="border-t border-green-500/20 px-5 py-4 space-y-2.5">
-          {/* Forecast 2025 button */}
+          {/* Forecast 2030 button */}
           <button
             onClick={fetchForecast}
             disabled={forecasting || backendStatus !== "online"}
@@ -601,7 +848,7 @@ export default function MapInterface() {
                 size={15}
                 className={forecasting ? "animate-spin" : ""}
               />
-              {forecasting ? "Processing CDX…" : "Forecast 2025"}
+              {forecasting ? "Processing CDX…" : "Forecast 2030"}
             </span>
           </button>
 
@@ -646,6 +893,79 @@ export default function MapInterface() {
           </div>
         </div>
       </aside>
+
+      {/* ─── TEMPORAL TIME-LAPSE SLIDER (Bottom Center) ──────────────── */}
+      <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-40 flex flex-col items-center
+                      rounded-2xl border border-green-500/30 bg-black/85 px-6 py-3.5
+                      shadow-2xl shadow-green-500/10 backdrop-blur-2xl
+                      transition-all duration-300 hover:border-green-400/50">
+        {/* Header: Title, Play/Pause toggle, Selected Year readout */}
+        <div className="flex items-center justify-between w-full min-w-[280px] sm:min-w-[360px] mb-2.5">
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setIsPlaying(!isPlaying)}
+              className="flex h-6 w-6 items-center justify-center rounded-md border border-green-500/30
+                         bg-green-500/10 text-green-400 transition-colors hover:bg-green-500/20 hover:text-green-300"
+              title={isPlaying ? "Pause time-lapse" : "Play time-lapse (1995–2025)"}
+              aria-label={isPlaying ? "Pause time-lapse" : "Play time-lapse"}
+            >
+              {isPlaying ? <Pause size={12} /> : <Play size={12} className="ml-0.5" />}
+            </button>
+            <div className="flex items-center gap-1.5">
+              <Clock size={13} className="text-green-400" />
+              <span className="text-[10px] font-bold uppercase tracking-wider text-gray-300">
+                Temporal Time-Lapse
+              </span>
+            </div>
+          </div>
+
+          <div className="flex items-baseline gap-1.5 bg-green-500/10 px-2.5 py-0.5 rounded border border-green-500/25">
+            <span className="text-[10px] text-gray-400 font-mono">Year:</span>
+            <span className="font-mono text-base font-extrabold text-green-400 tracking-wider">
+              {currentYear}
+            </span>
+          </div>
+        </div>
+
+        {/* Range slider */}
+        <input
+          type="range"
+          min="1995"
+          max="2025"
+          step="5"
+          value={currentYear}
+          onChange={(e) => {
+            setCurrentYear(Number(e.target.value));
+            if (isPlaying) setIsPlaying(false);
+            if (forecastData) setForecastData(null);
+          }}
+          className="w-full min-w-[280px] sm:min-w-[360px] h-2 cursor-pointer appearance-none rounded-lg bg-gray-800 accent-green-400 transition-all hover:bg-gray-700 focus:outline-none"
+          aria-label="Temporal urban growth year slider"
+        />
+
+        {/* Year tick markers */}
+        <div className="flex justify-between w-full text-[10px] font-mono text-gray-500 mt-2 px-0.5">
+          {["1995", "2000", "2005", "2010", "2015", "2020", "2025"].map((yr) => (
+            <button
+              key={yr}
+              type="button"
+              onClick={() => {
+                setCurrentYear(Number(yr));
+                if (isPlaying) setIsPlaying(false);
+                if (forecastData) setForecastData(null);
+              }}
+              className={`transition-all ${
+                currentYear === Number(yr)
+                  ? "font-bold text-green-400 scale-110"
+                  : "text-gray-400 hover:text-gray-200"
+              }`}
+            >
+              {yr}
+            </button>
+          ))}
+        </div>
+      </div>
 
       {/* ─── MAP WATERMARK / BRANDING ─────────────────────────────────── */}
       <div className="absolute bottom-5 right-14 z-30 flex items-center gap-2
