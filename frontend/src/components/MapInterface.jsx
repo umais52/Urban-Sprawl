@@ -1,13 +1,17 @@
 /**
- * MapInterface – Core map + floating CDX control panel
- * =====================================================
- * CDX Point 2/8 : Forecast trigger
- * Visual        : Dark frosted-glass sidebar with neon-green (#39ff14) accents
- *
- * Map is rendered full-viewport via react-map-gl (Mapbox GL JS wrapper).
- * Sidebar floats on the left with a glassmorphism aesthetic.
+ * MapInterface — Sprawl Vision analytical workspace
+ * ==================================================
+ * Refined GIS interface:
+ *   - Strict Carbon/Zinc neutral palette (#0C0C0E / #141417 / #26262B)
+ *   - Unified analytical Amber (#D97706 / #F59E0B) matching urban raster
+ *   - Bottom timeline is single source of truth for scrubbing & playback
+ *   - Repurposed sidebar History tab: Temporal Summary Card + opacity/visibility
+ *   - Centered floating bottom timeline dock (unobstructed Mapbox controls)
+ *   - Context-aware cartographic legend with uniform 12x12 raster swatches
+ *   - Drawing tools scoped to Simulate workflow
+ *   - Precision GIS coordinate readout footer
  */
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Map, {
   Layer,
   NavigationControl,
@@ -21,26 +25,25 @@ import axios from "axios";
 import DrawControl from "./DrawControl";
 
 import {
-  Activity,
   AlertTriangle,
-  ChevronRight,
   Clock,
-  Cpu,
+  Eye,
+  EyeOff,
   Layers,
-  MapPin,
+  PanelLeftClose,
+  PanelLeftOpen,
   Pause,
   Play,
-  Radar,
+  RotateCcw,
   Route,
-  Satellite,
-  Zap,
+  Sliders,
+  TrendingUp,
 } from "lucide-react";
 
 import { getForecastLayer, getHealth, getHistory } from "../services/api";
 
-
 // ---------------------------------------------------------------------------
-// Mapbox token from .env  (VITE_ prefix required by Vite)
+// Mapbox token from .env (VITE_ prefix required by Vite)
 // ---------------------------------------------------------------------------
 const MAPBOX_TOKEN = import.meta.env.VITE_MAPBOX_TOKEN;
 const IS_TOKEN_PLACEHOLDER =
@@ -52,84 +55,14 @@ const ACTIVE_MAP_STYLE = IS_TOKEN_PLACEHOLDER
   : "mapbox://styles/mapbox/dark-v11";
 
 // ---------------------------------------------------------------------------
-// Karachi centre coordinates
+// Karachi centre — analytical 2D view, 0° pitch
 // ---------------------------------------------------------------------------
 const KARACHI = {
   longitude: 67.0011,
   latitude: 24.8607,
   zoom: 10.3,
-  pitch: 42,
-  bearing: -12,
-};
-
-// ---------------------------------------------------------------------------
-// CDX Forecast Polygon Layer Styles (Neon-red #ff3344, 0.55 opacity fill)
-// ---------------------------------------------------------------------------
-const forecastFillLayer = {
-  id: "forecast-polygons-fill",
-  type: "fill",
-  paint: {
-    "fill-color": "#ff3344",
-    "fill-opacity": 0.55,
-  },
-};
-
-const forecastOutlineLayer = {
-  id: "forecast-polygons-outline",
-  type: "line",
-  paint: {
-    "line-color": "#ff3344",
-    "line-width": 2,
-    "line-opacity": 0.95,
-  },
-};
-
-// ---------------------------------------------------------------------------
-// Temporal History Layer Styles (Neon-green #39ff14 with smooth transitions)
-// ---------------------------------------------------------------------------
-const historyFillLayer = {
-  id: "history-polygons-fill",
-  type: "fill",
-  paint: {
-    "fill-color": "#39ff14",
-    "fill-opacity": 0.5,
-    "fill-color-transition": { duration: 600, delay: 0 },
-    "fill-opacity-transition": { duration: 600, delay: 0 },
-  },
-};
-
-const historyOutlineLayer = {
-  id: "history-polygons-outline",
-  type: "line",
-  paint: {
-    "line-color": "#39ff14",
-    "line-width": 2,
-    "line-opacity": 0.9,
-    "line-opacity-transition": { duration: 600, delay: 0 },
-    "line-width-transition": { duration: 600, delay: 0 },
-  },
-};
-
-// ---------------------------------------------------------------------------
-// What-If Simulation Delta Layer Styles (Neon-blue #00e5ff, 0.6 opacity fill)
-// ---------------------------------------------------------------------------
-const simulationFillLayer = {
-  id: "simulation-polygons-fill",
-  type: "fill",
-  paint: {
-    "fill-color": "#00e5ff",
-    "fill-opacity": 0.6,
-  },
-};
-
-const simulationOutlineLayer = {
-  id: "simulation-polygons-outline",
-  type: "line",
-  paint: {
-    "line-color": "#00e5ff",
-    "line-width": 2,
-    "line-opacity": 0.9,
-  },
+  pitch: 0,
+  bearing: 0,
 };
 
 // ---------------------------------------------------------------------------
@@ -169,6 +102,33 @@ function bufferLineCoordinates(coords, bufferDeg = 0.012) {
 }
 
 // ---------------------------------------------------------------------------
+// Available timeline years
+// ---------------------------------------------------------------------------
+const TIMELINE_YEARS = [1995, 2000, 2005, 2010, 2015, 2020, 2025];
+
+const HISTORY_SWATCH_FALLBACK = "#D97706";
+
+function formatKm2(value) {
+  return Number(value).toLocaleString("en-US", {
+    minimumFractionDigits: 1,
+    maximumFractionDigits: 1,
+  });
+}
+
+function formatCount(value) {
+  return Number(value).toLocaleString("en-US");
+}
+
+// ---------------------------------------------------------------------------
+// Workflow tabs
+// ---------------------------------------------------------------------------
+const WORKFLOWS = {
+  HISTORY: "history",
+  FORECAST: "forecast",
+  SIMULATE: "simulate",
+};
+
+// ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
 export default function MapInterface() {
@@ -177,7 +137,8 @@ export default function MapInterface() {
   const mapRef = useRef(null);
 
   // UI state
-  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [panelOpen, setPanelOpen] = useState(true);
+  const [activeWorkflow, setActiveWorkflow] = useState(WORKFLOWS.HISTORY);
   const [backendStatus, setBackendStatus] = useState(null); // null | "online" | "offline"
   const [forecasting, setForecasting] = useState(false);
   const [forecastResult, setForecastResult] = useState(null);
@@ -186,10 +147,16 @@ export default function MapInterface() {
   const [forecastData, setForecastData] = useState(null);
   const [popupInfo, setPopupInfo] = useState(null);
 
-  // Temporal Time-Lapse (1995 - 2025) state
+  // Temporal Time-Lapse state
   const [currentYear, setCurrentYear] = useState(2020);
   const [historyData, setHistoryData] = useState(null);
   const [isPlaying, setIsPlaying] = useState(false);
+  const [historyOpacity, setHistoryOpacity] = useState(0.5);
+  const [historyVisible, setHistoryVisible] = useState(true);
+  const [labelLayerId, setLabelLayerId] = useState(null);
+  // `Map` is the react-map-gl component, so the year cache uses the global constructor.
+  const historyCacheRef = useRef(new globalThis.Map());
+  const historyInflightRef = useRef(new globalThis.Map());
 
   // What-If Sandbox (Drawn Road) state
   const [drawnRoad, setDrawnRoad] = useState(null);
@@ -204,13 +171,38 @@ export default function MapInterface() {
       .catch(() => setBackendStatus("offline"));
   }, []);
 
-  // ── Fetch Temporal History layer on currentYear change ───────────────────
+  // ── Fetch Temporal History overlay, then prefetch the other years ────────
+  const loadHistoryYear = useCallback((year) => {
+    const cached = historyCacheRef.current.get(year);
+    if (cached) return Promise.resolve(cached);
+    const pending = historyInflightRef.current.get(year);
+    if (pending) return pending;
+
+    const request = getHistory(year)
+      .then(({ data }) => {
+        historyCacheRef.current.set(year, data);
+        return data;
+      })
+      .finally(() => {
+        historyInflightRef.current.delete(year);
+      });
+    historyInflightRef.current.set(year, request);
+    return request;
+  }, []);
+
   useEffect(() => {
     let isSubscribed = true;
-    getHistory(currentYear)
-      .then(({ data }) => {
-        if (isSubscribed) {
-          setHistoryData(data);
+    const cached = historyCacheRef.current.get(currentYear);
+    if (cached) setHistoryData(cached);
+
+    loadHistoryYear(currentYear)
+      .then((data) => {
+        if (isSubscribed) setHistoryData(data);
+        for (const year of TIMELINE_YEARS) {
+          if (year === currentYear) continue;
+          loadHistoryYear(year).catch((err) => {
+            console.error(`[History ${year}]`, err);
+          });
         }
       })
       .catch((err) => {
@@ -220,7 +212,15 @@ export default function MapInterface() {
     return () => {
       isSubscribed = false;
     };
-  }, [currentYear]);
+  }, [currentYear, loadHistoryYear]);
+
+  const handleMapLoad = useCallback((evt) => {
+    const map = evt?.target || mapRef.current?.getMap?.();
+    const firstSymbol = map
+      ?.getStyle()
+      ?.layers?.find((layer) => layer.type === "symbol");
+    if (firstSymbol) setLabelLayerId(firstSymbol.id);
+  }, []);
 
   // ── Auto-play time-lapse playback loop ───────────────────────────────────
   useEffect(() => {
@@ -231,12 +231,11 @@ export default function MapInterface() {
     return () => clearInterval(interval);
   }, [isPlaying]);
 
-  // ── Forecast handler (Fetches GeoJSON from /api/v1/forecast_layer) ──────
+  // ── Forecast handler ─────────────────────────────────────────────────────
   const fetchForecast = useCallback(async () => {
     setForecasting(true);
     setForecastResult(null);
     setPopupInfo(null);
-    setHistoryData(null); // Clear history layer so ONLY real forecast polygons are visible
     try {
       const { data } = await getForecastLayer();
       setForecastData(data);
@@ -257,6 +256,9 @@ export default function MapInterface() {
         patch_count: data.features?.length || 5,
         total_area_km2: Number(totalArea).toFixed(1),
         target_year: data.metadata?.projection_year || 2030,
+        inference_time_ms: data.metadata?.inference_time_ms,
+        threshold: data.metadata?.threshold,
+        fusion_model: data.metadata?.fusion_model,
       });
 
       // Smoothly animate camera to frame the Karachi eastern/northern growth frontier
@@ -264,7 +266,7 @@ export default function MapInterface() {
         mapRef.current.flyTo({
           center: [67.24, 25.02],
           zoom: 10.2,
-          pitch: 42,
+          pitch: 0,
           duration: 1600,
         });
       }
@@ -301,7 +303,7 @@ export default function MapInterface() {
   const handleSimulateRoad = useCallback(async () => {
     if (!drawnRoad) {
       alert(
-        "No road line drawn yet!\n\nPlease click the Line tool in the top-right corner of the map to draw a proposed road."
+        "No road line drawn yet.\n\nUse the line tool in the top-right corner of the map to trace a proposed road corridor."
       );
       return;
     }
@@ -321,7 +323,6 @@ export default function MapInterface() {
       const data = response.data;
       setSimulationResult(data);
 
-      // Format as GeoJSON FeatureCollection if not already one
       let geojson = data;
       if (data && (data.type === "FeatureCollection" || data.type === "Feature")) {
         geojson = data;
@@ -357,18 +358,18 @@ export default function MapInterface() {
       setSimulationData(geojson);
     } catch (err) {
       console.error("[Simulate Road]", err);
+      setSimulationResult({ error: err.message });
     } finally {
       setSimulating(false);
     }
   }, [drawnRoad]);
 
-  // Map polygon click interaction
+  // ── Map polygon click interaction ───────────────────────────────────────
   const handleMapClick = useCallback((evt) => {
     const feature = evt.features && evt.features[0];
     if (
       feature &&
       (feature.layer.id === "forecast-polygons-fill" ||
-        feature.layer.id === "history-polygons-fill" ||
         feature.layer.id === "simulation-polygons-fill")
     ) {
       setPopupInfo({
@@ -382,46 +383,135 @@ export default function MapInterface() {
     }
   }, []);
 
-  // ── Render ──────────────────────────────────────────────────────────────
+  const getLayerLabel = (layerId) => {
+    if (layerId === "forecast-polygons-fill") return "Forecast";
+    if (layerId === "simulation-polygons-fill") return "Scenario";
+    return "Observed";
+  };
+
+  const getLayerColor = (layerId) => {
+    if (layerId === "forecast-polygons-fill") return "#E06356";
+    if (layerId === "simulation-polygons-fill") return "#5B98D4";
+    return "#D97706";
+  };
+
+  // ── Forecast and simulation styles stay on GeoJSON fill/line layers ─────
+  const forecastFillLayer = {
+    id: "forecast-polygons-fill",
+    type: "fill",
+    paint: {
+      "fill-color": "#E06356",
+      "fill-opacity": 0.45,
+    },
+  };
+
+  const forecastOutlineLayer = {
+    id: "forecast-polygons-outline",
+    type: "line",
+    paint: {
+      "line-color": "#E06356",
+      "line-width": 1.5,
+      "line-opacity": 0.85,
+    },
+  };
+
+  const simulationFillLayer = {
+    id: "simulation-polygons-fill",
+    type: "fill",
+    paint: {
+      "fill-color": "#5B98D4",
+      "fill-opacity": 0.5,
+    },
+  };
+
+  const simulationOutlineLayer = {
+    id: "simulation-polygons-outline",
+    type: "line",
+    paint: {
+      "line-color": "#5B98D4",
+      "line-width": 1.5,
+      "line-opacity": 0.85,
+    },
+  };
+
+  const historyStatsReady = historyData?.year === currentYear;
+
+  const observedAreaKm2 = useMemo(() => {
+    if (!historyStatsReady || historyData?.area_km2 == null) return "—";
+    return formatKm2(historyData.area_km2);
+  }, [historyData, historyStatsReady]);
+
+  const observedPatchesCount = useMemo(() => {
+    if (!historyStatsReady || historyData?.patches == null) return "—";
+    return formatCount(historyData.patches);
+  }, [historyData, historyStatsReady]);
+
+  const spatialResolutionLabel = useMemo(() => {
+    if (!historyStatsReady || historyData?.resolution_m == null) return "—";
+    return `${historyData.resolution_m} m × ${historyData.resolution_m} m`;
+  }, [historyData, historyStatsReady]);
+
+  const showHistoryLegend =
+    activeWorkflow === WORKFLOWS.HISTORY && Boolean(historyData?.image_url) && historyVisible;
+  const historySwatchColor = historyData?.color || HISTORY_SWATCH_FALLBACK;
+
   return (
-    <div className="relative h-screen w-screen overflow-hidden bg-black font-sans">
-      {/* ─── MAP ──────────────────────────────────────────────────────── */}
+    <div
+      className="relative h-screen w-screen overflow-hidden font-sans select-none"
+      style={{ background: "#0C0C0E" }}
+    >
+      {/* ─── MAP CANVAS ─────────────────────────────────────────────────── */}
       <Map
         ref={mapRef}
         {...viewState}
         onMove={(evt) => setViewState(evt.viewState)}
         onClick={handleMapClick}
+        onLoad={handleMapLoad}
         interactiveLayerIds={[
           "forecast-polygons-fill",
-          "history-polygons-fill",
           "simulation-polygons-fill",
         ]}
         mapboxAccessToken={MAPBOX_TOKEN}
         mapStyle={ACTIVE_MAP_STYLE}
         style={{ width: "100%", height: "100%" }}
         antialias
-        attributionControl={false}
       >
         <NavigationControl position="bottom-right" showCompass showZoom />
-        <ScaleControl position="bottom-left" maxWidth={200} unit="metric" />
+        <ScaleControl position="bottom-left" maxWidth={180} unit="metric" />
 
-        {/* ─── MapboxDraw Line Drawing Control (Top-Right) ─────────────── */}
-        <DrawControl
-          position="top-right"
-          onCreate={handleDrawCreate}
-          onUpdate={handleDrawUpdate}
-          onDelete={handleDrawDelete}
-        />
+        {/* ─── MapboxDraw: Only mounted & visible in Simulate workflow ─── */}
+        {activeWorkflow === WORKFLOWS.SIMULATE && (
+          <DrawControl
+            position="top-right"
+            onCreate={handleDrawCreate}
+            onUpdate={handleDrawUpdate}
+            onDelete={handleDrawDelete}
+          />
+        )}
 
-        {/* ─── Temporal Sprawl History Layer (Time-Lapse with transitions) ── */}
-        {historyData && (
-          <Source id="history-layer-source" type="geojson" data={historyData}>
-            <Layer {...historyFillLayer} />
-            <Layer {...historyOutlineLayer} />
+        {/* ─── Observed History raster (History tab only) ─── */}
+        {activeWorkflow === WORKFLOWS.HISTORY && historyData?.image_url && (
+          <Source
+            id="history-urban-source"
+            type="image"
+            url={historyData.image_url}
+            coordinates={historyData.coordinates}
+          >
+            <Layer
+              id="history-urban-layer"
+              type="raster"
+              beforeId={labelLayerId || undefined}
+              layout={{ visibility: historyVisible ? "visible" : "none" }}
+              paint={{
+                "raster-opacity": historyOpacity,
+                "raster-resampling": "nearest",
+                "raster-fade-duration": 0,
+              }}
+            />
           </Source>
         )}
 
-        {/* ─── CDX Forecast Growth Polygons (Neon Red Fill & Outline) ──── */}
+        {/* ─── CDX Forecast Growth Layer ─── */}
         {forecastData && (
           <Source id="forecast-layer-source" type="geojson" data={forecastData}>
             <Layer {...forecastFillLayer} />
@@ -429,7 +519,7 @@ export default function MapInterface() {
           </Source>
         )}
 
-        {/* ─── What-If Road Simulation Delta Layer (Neon Blue Fill) ──── */}
+        {/* ─── What-If Road Simulation Delta Layer ─── */}
         {simulationData && (
           <Source id="simulation-layer-source" type="geojson" data={simulationData}>
             <Layer {...simulationFillLayer} />
@@ -437,7 +527,7 @@ export default function MapInterface() {
           </Source>
         )}
 
-        {/* ─── Growth Cluster Popup on Click ──────────────────────────── */}
+        {/* ─── Feature Popup on Click ───────────────────────────────────── */}
         {popupInfo && (
           <Popup
             longitude={popupInfo.longitude}
@@ -447,98 +537,101 @@ export default function MapInterface() {
             closeButton={true}
             closeOnClick={false}
           >
-            <div className={`rounded-lg bg-gray-950 p-3 text-xs text-white border shadow-xl max-w-xs ${
-              popupInfo.layerId === "forecast-polygons-fill"
-                ? "border-red-500/50"
-                : popupInfo.layerId === "simulation-polygons-fill"
-                  ? "border-cyan-500/50"
-                  : "border-green-500/40"
-            }`}>
-              <div className="flex items-center justify-between gap-2">
-                <p className={`font-bold text-sm ${
-                  popupInfo.layerId === "forecast-polygons-fill"
-                    ? "text-red-400"
-                    : popupInfo.layerId === "simulation-polygons-fill"
-                      ? "text-cyan-400"
-                      : "text-green-400"
-                }`}>
-                  {popupInfo.properties?.name}
+            <div className="p-3 text-[13px] max-w-[270px]">
+              <div className="flex items-start justify-between gap-2 mb-2">
+                <p
+                  className="font-semibold text-[13px] leading-tight"
+                  style={{ color: getLayerColor(popupInfo.layerId) }}
+                >
+                  {popupInfo.properties?.name || "Feature"}
                 </p>
-                {popupInfo.layerId === "simulation-polygons-fill" ? (
-                  <span className="rounded bg-cyan-500/20 px-1.5 py-0.5 text-[9px] font-mono text-cyan-300 font-bold border border-cyan-500/30">
-                    What-If Delta
-                  </span>
-                ) : popupInfo.properties?.year ? (
-                  <span className="rounded bg-green-500/20 px-1.5 py-0.5 text-[9px] font-mono text-green-300 font-bold border border-green-500/30">
-                    {popupInfo.properties.year}
-                  </span>
-                ) : (
-                  <span className="rounded bg-red-500/20 px-1.5 py-0.5 text-[9px] font-mono text-red-300 font-bold border border-red-500/30">
-                    2030 Forecast
-                  </span>
-                )}
+                <span
+                  className="shrink-0 rounded px-1.5 py-0.5 text-[10px] font-mono font-medium"
+                  style={{
+                    background: `${getLayerColor(popupInfo.layerId)}18`,
+                    color: getLayerColor(popupInfo.layerId),
+                    border: `1px solid ${getLayerColor(popupInfo.layerId)}33`,
+                  }}
+                >
+                  {popupInfo.properties?.year
+                    ? `Observed ${popupInfo.properties.year}`
+                    : getLayerLabel(popupInfo.layerId)}
+                </span>
               </div>
-              <p className="text-gray-400 text-[11px] mt-0.5">
-                {popupInfo.properties?.corridor}
-              </p>
+
+              {popupInfo.properties?.corridor && (
+                <p className="text-[11px] mb-2" style={{ color: "#A1A1AA" }}>
+                  {popupInfo.properties.corridor}
+                </p>
+              )}
               {popupInfo.properties?.stage && (
-                <p className="text-[10px] text-green-400/80 font-mono mt-0.5">
+                <p className="text-[11px] mb-2" style={{ color: "#A1A1AA" }}>
                   {popupInfo.properties.stage}
                 </p>
               )}
-              <div className="mt-2 grid grid-cols-2 gap-2 border-t border-white/10 pt-2 text-[10px]">
+
+              <div
+                className="grid grid-cols-2 gap-x-4 gap-y-2 pt-2"
+                style={{ borderTop: "1px solid #26262B" }}
+              >
                 {popupInfo.properties?.p_urban !== undefined && (
                   <div>
-                    <span className="text-gray-500">P(Urban):</span>{" "}
-                    <span className={`font-mono font-bold ${
-                      popupInfo.layerId === "forecast-polygons-fill"
-                        ? "text-red-400"
-                        : popupInfo.layerId === "simulation-polygons-fill"
-                          ? "text-cyan-400"
-                          : "text-green-400"
-                    }`}>
-                      {(Number(popupInfo.properties.p_urban) * 100).toFixed(1)}%
+                    <span className="text-[10px] uppercase tracking-wider block" style={{ color: "#71717A" }}>
+                      P(Urban)
                     </span>
+                    <p className="font-mono text-[13px] font-semibold text-[#F4F4F6]">
+                      {(Number(popupInfo.properties.p_urban) * 100).toFixed(1)}%
+                    </p>
                   </div>
                 )}
                 {popupInfo.properties?.delta_p_urban !== undefined && (
                   <div>
-                    <span className="text-gray-500">Delta Uplift:</span>{" "}
-                    <span className="font-mono text-cyan-400 font-bold">
-                      +{((Number(popupInfo.properties.delta_p_urban)) * 100).toFixed(2)}%
+                    <span className="text-[10px] uppercase tracking-wider block" style={{ color: "#71717A" }}>
+                      Delta
                     </span>
+                    <p className="font-mono text-[13px] font-semibold" style={{ color: "#5B98D4" }}>
+                      +{((Number(popupInfo.properties.delta_p_urban)) * 100).toFixed(2)}%
+                    </p>
                   </div>
                 )}
                 {popupInfo.properties?.affected_area_cells !== undefined && (
                   <div>
-                    <span className="text-gray-500">Impact Cells:</span>{" "}
-                    <span className="font-mono text-gray-200">
-                      {popupInfo.properties.affected_area_cells}
+                    <span className="text-[10px] uppercase tracking-wider block" style={{ color: "#71717A" }}>
+                      Cells
                     </span>
+                    <p className="font-mono text-[12px] text-[#F4F4F6]">
+                      {popupInfo.properties.affected_area_cells}
+                    </p>
                   </div>
                 )}
                 {popupInfo.properties?.area_km2 !== undefined && (
                   <div>
-                    <span className="text-gray-500">Area:</span>{" "}
-                    <span className="font-mono text-gray-200">
-                      {popupInfo.properties?.area_km2} km²
+                    <span className="text-[10px] uppercase tracking-wider block" style={{ color: "#71717A" }}>
+                      Area
                     </span>
+                    <p className="font-mono text-[12px] text-[#F4F4F6]">
+                      {popupInfo.properties?.area_km2} km²
+                    </p>
                   </div>
                 )}
                 {popupInfo.properties?.projected_growth_rate && (
                   <div>
-                    <span className="text-gray-500">Growth:</span>{" "}
-                    <span className="font-mono text-yellow-400">
-                      {popupInfo.properties?.projected_growth_rate}
+                    <span className="text-[10px] uppercase tracking-wider block" style={{ color: "#71717A" }}>
+                      Growth Rate
                     </span>
+                    <p className="font-mono text-[12px] text-[#F4F4F6]">
+                      {popupInfo.properties?.projected_growth_rate}
+                    </p>
                   </div>
                 )}
                 {popupInfo.properties?.risk_level && (
                   <div>
-                    <span className="text-gray-500">Risk:</span>{" "}
-                    <span className="text-red-400 font-medium">
-                      {popupInfo.properties?.risk_level}
+                    <span className="text-[10px] uppercase tracking-wider block" style={{ color: "#71717A" }}>
+                      Sprawl
                     </span>
+                    <p className="text-[12px] font-medium text-[#F4F4F6]">
+                      {popupInfo.properties?.risk_level}
+                    </p>
                   </div>
                 )}
               </div>
@@ -547,433 +640,686 @@ export default function MapInterface() {
         )}
       </Map>
 
-      {/* ─── TOKEN NOTICE (if token is placeholder, positioned below draw tool) ── */}
+      {/* ─── MAPBOX TOKEN WARNING ───────────────────────────────────────── */}
       {IS_TOKEN_PLACEHOLDER && (
-        <div className="absolute top-20 right-4 z-40 max-w-xs rounded-xl border border-yellow-500/30 bg-black/85 p-3 shadow-2xl backdrop-blur-xl">
+        <div
+          className="absolute top-4 right-4 z-40 max-w-[270px] rounded-md p-3"
+          style={{
+            background: "#141417",
+            border: "1px solid #D97706",
+            boxShadow: "0 4px 16px rgba(0,0,0,0.4)",
+          }}
+        >
           <div className="flex items-start gap-2.5">
-            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-yellow-400" />
-            <div className="text-xs">
-              <p className="font-semibold text-yellow-300">Mapbox Token Required</p>
-              <p className="mt-1 text-gray-300 text-[11px]">
-                To load live dark vector & satellite tiles, paste your public token in{" "}
-                <code className="rounded bg-white/10 px-1 py-0.5 text-green-300 font-mono text-[10px]">frontend/.env</code>:
-              </p>
-              <p className="mt-1 font-mono text-[10px] text-gray-400">
-                VITE_MAPBOX_TOKEN=pk.eyJ1...
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-[#F59E0B]" />
+            <div className="text-[12px]">
+              <p className="font-medium text-[#F59E0B]">Mapbox token required</p>
+              <p className="mt-1 text-[#A1A1AA]">
+                Set your personal token in{" "}
+                <code className="rounded px-1 py-0.5 text-[11px] font-mono bg-[#1F1F23] text-[#F4F4F6]">
+                  frontend/.env
+                </code>
               </p>
             </div>
           </div>
         </div>
       )}
 
-      {/* ─── SIDEBAR TOGGLE (collapsed state) ─────────────────────────── */}
-      {!sidebarOpen && (
+      {/* ─── PANEL TOGGLE (collapsed state) ─────────────────────────────── */}
+      {!panelOpen && (
         <button
-          onClick={() => setSidebarOpen(true)}
-          className="absolute left-4 top-4 z-50 flex items-center gap-2
-                     rounded-lg border border-green-500/30
-                     bg-black/60 px-3 py-2 text-sm text-green-400
-                     shadow-lg shadow-green-500/10 backdrop-blur-xl
-                     transition-all hover:border-green-400 hover:bg-black/80
-                     hover:shadow-green-500/20"
-          aria-label="Open control panel"
+          onClick={() => setPanelOpen(true)}
+          className="absolute left-4 top-4 z-50 flex items-center justify-center
+                     rounded-md p-2 transition-colors hover:bg-[#1F1F23]"
+          style={{
+            background: "rgba(12, 12, 14, 0.94)",
+            border: "1px solid #26262B",
+            color: "#A1A1AA",
+            backdropFilter: "blur(8px)",
+          }}
+          aria-label="Open analysis panel"
+          title="Open analysis panel"
         >
-          <Radar size={16} />
-          <ChevronRight size={14} />
+          <PanelLeftOpen size={16} />
         </button>
       )}
 
-      {/* ─── FLOATING SIDEBAR ─────────────────────────────────────────── */}
+      {/* ─── ANALYSIS PANEL ────────────────────────────────────────────── */}
       <aside
         className={`
-          absolute left-4 top-4 bottom-4 z-40 flex w-80 flex-col
-          overflow-hidden rounded-2xl
-          border border-green-500/20
-          bg-gradient-to-b from-black/70 via-gray-950/60 to-black/70
-          shadow-2xl shadow-green-500/5 backdrop-blur-2xl
-          transition-all duration-500 ease-out
-          ${sidebarOpen ? "translate-x-0 opacity-100" : "-translate-x-full opacity-0 pointer-events-none"}
+          absolute left-0 top-0 bottom-0 z-40 flex flex-col
+          overflow-hidden panel-transition
+          ${panelOpen ? "w-[280px] opacity-100" : "w-0 opacity-0 pointer-events-none"}
         `}
+        style={{
+          background: "#0C0C0E",
+          borderRight: "1px solid #26262B",
+        }}
       >
         {/* ── Header ────────────────────────────────────────────────── */}
-        <div className="relative border-b border-green-500/20 px-5 py-5">
-          {/* Decorative glow line */}
-          <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-green-400/60 to-transparent" />
-
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <div className="flex h-9 w-9 items-center justify-center rounded-lg
-                              border border-green-500/30 bg-green-500/10">
-                <Satellite size={18} className="text-green-400" />
-              </div>
-              <div>
-                <h1 className="text-base font-bold tracking-tight text-green-400">
-                  Aks-e-Shajr CDX
-                </h1>
-                <p className="text-[11px] font-medium uppercase tracking-widest text-gray-500">
-                  Urban Intelligence System
-                </p>
-              </div>
-            </div>
-
-            <button
-              onClick={() => setSidebarOpen(false)}
-              className="rounded-md p-1 text-gray-500 transition-colors
-                         hover:bg-white/5 hover:text-green-400"
-              aria-label="Close panel"
-            >
-              ✕
-            </button>
-          </div>
-        </div>
-
-        {/* ── Status row ────────────────────────────────────────────── */}
-        <div className="flex items-center gap-2 border-b border-white/5 px-5 py-3">
-          <span
-            className={`h-2 w-2 rounded-full ${
-              backendStatus === "online"
-                ? "bg-green-400 shadow-sm shadow-green-400/50"
-                : backendStatus === "offline"
-                  ? "bg-red-500"
-                  : "animate-pulse bg-yellow-400"
-            }`}
-          />
-          <span className="text-xs text-gray-400">
-            {backendStatus === "online"
-              ? "Backend connected"
-              : backendStatus === "offline"
-                ? "Backend offline"
-                : "Connecting…"}
-          </span>
-          <span className="ml-auto flex items-center gap-1 text-[10px] text-gray-600">
-            <MapPin size={10} /> Karachi, PK
-          </span>
-        </div>
-
-        {/* ── Coordinate readout ────────────────────────────────────── */}
-        <div className="grid grid-cols-3 gap-px border-b border-white/5 bg-white/[0.02]">
-          {[
-            { label: "LAT", value: viewState.latitude.toFixed(4) },
-            { label: "LNG", value: viewState.longitude.toFixed(4) },
-            { label: "ZOOM", value: viewState.zoom.toFixed(1) },
-          ].map((item) => (
-            <div key={item.label} className="px-3 py-2.5 text-center">
-              <p className="text-[9px] font-semibold uppercase tracking-widest text-gray-600">
-                {item.label}
-              </p>
-              <p className="mt-0.5 font-mono text-xs text-green-400/80">
-                {item.value}
-              </p>
-            </div>
-          ))}
-        </div>
-
-        {/* ── CDX Metrics (scrollable body) ─────────────────────────── */}
-        <div className="flex-1 overflow-y-auto px-5 py-4">
-          <p className="mb-3 flex items-center gap-2 text-[10px] font-semibold uppercase tracking-widest text-gray-500">
-            <Layers size={12} /> CDX Modules
-          </p>
-
-          <div className="space-y-2">
-            {[
-              {
-                icon: <Cpu size={14} />,
-                title: "XGBoost Classifier",
-                subtitle: "15 features · 300 trees",
-                status: "ready",
-              },
-              {
-                icon: <Activity size={14} />,
-                title: "CNN-LSTM Predictor",
-                subtitle: "4-step temporal · 64×64 tiles",
-                status: "ready",
-              },
-              {
-                icon: <Zap size={14} />,
-                title: "CA Module",
-                subtitle: "Contextual attention branch",
-                status: "ready",
-              },
-            ].map((mod) => (
+        <div
+          className="flex items-center justify-between px-4 py-3"
+          style={{ borderBottom: "1px solid #26262B" }}
+        >
+          <div className="flex flex-col">
+            <div className="flex items-center gap-2">
+              <h1 className="text-[14px] font-semibold tracking-tight text-[#F4F4F6]">
+                Sprawl Vision
+              </h1>
+              {/* Status pill badge */}
               <div
-                key={mod.title}
-                className="flex items-center gap-3 rounded-lg border border-white/5
-                           bg-white/[0.02] px-3 py-2.5 transition-colors
-                           hover:border-green-500/20 hover:bg-green-500/[0.03]"
+                className="flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-mono"
+                style={{
+                  background: "#141417",
+                  border: "1px solid #26262B",
+                  color: "#A1A1AA",
+                }}
+                title={backendStatus === "online" ? "FastAPI backend active" : "Backend disconnected"}
               >
-                <div className="text-green-400/60">{mod.icon}</div>
-                <div className="flex-1 min-w-0">
-                  <p className="text-xs font-medium text-gray-300">{mod.title}</p>
-                  <p className="text-[10px] text-gray-600">{mod.subtitle}</p>
-                </div>
-                <span className="h-1.5 w-1.5 rounded-full bg-green-400/60" />
+                <span
+                  className="h-1.5 w-1.5 rounded-full"
+                  style={{
+                    background:
+                      backendStatus === "online"
+                        ? "#10B981"
+                        : backendStatus === "offline"
+                          ? "#EF4444"
+                          : "#F59E0B",
+                  }}
+                />
+                <span>{backendStatus === "online" ? "Online" : "Offline"}</span>
               </div>
-            ))}
+            </div>
+            <p className="text-[10px] font-medium text-[#71717A] tracking-wide mt-0.5">
+              Urban Sprawl Intelligence · Karachi
+            </p>
           </div>
+          <button
+            onClick={() => setPanelOpen(false)}
+            className="rounded p-1 transition-colors hover:bg-[#1F1F23] text-[#71717A] hover:text-[#F4F4F6]"
+            aria-label="Close panel"
+          >
+            <PanelLeftClose size={16} />
+          </button>
+        </div>
 
-          {/* ── Forecast Result ──────────────────────────────────────── */}
-          {forecastResult && !forecastResult.error && (
-            <div className="mt-4 rounded-lg border border-red-500/30
-                            bg-red-500/[0.05] p-3 shadow-lg shadow-red-500/5">
-              <div className="flex items-center justify-between mb-2">
-                <p className="text-[10px] font-semibold uppercase tracking-widest text-red-400 font-bold">
-                  Forecast 2030 Result
+        {/* ── Workflow Tabs ──────────────────────────────────────────── */}
+        <div className="flex" style={{ borderBottom: "1px solid #26262B" }}>
+          {[
+            { id: WORKFLOWS.HISTORY, label: "History", icon: <Clock size={13} /> },
+            { id: WORKFLOWS.FORECAST, label: "Forecast", icon: <TrendingUp size={13} /> },
+            { id: WORKFLOWS.SIMULATE, label: "Simulate", icon: <Route size={13} /> },
+          ].map((tab) => {
+            const isActive = activeWorkflow === tab.id;
+            return (
+              <button
+                key={tab.id}
+                onClick={() => setActiveWorkflow(tab.id)}
+                className="flex-1 flex items-center justify-center gap-1.5 py-2.5 text-[11px] font-medium transition-colors relative"
+                style={{
+                  color: isActive ? "#F4F4F6" : "#71717A",
+                  background: isActive ? "#141417" : "transparent",
+                }}
+              >
+                {tab.icon}
+                {tab.label}
+                {isActive && (
+                  <span
+                    className="absolute bottom-0 left-2 right-2 h-[2px] rounded-full"
+                    style={{ background: "#F59E0B" }}
+                  />
+                )}
+              </button>
+            );
+          })}
+        </div>
+
+        {/* ── Workflow Content (scrollable) ──────────────────────────── */}
+        <div className="flex-1 overflow-y-auto">
+          {/* === HISTORY WORKFLOW (Repurposed: No duplicate timeline controls) === */}
+          {activeWorkflow === WORKFLOWS.HISTORY && (
+            <div className="px-4 py-3 space-y-4">
+              <div>
+                <p className="text-[11px] leading-relaxed text-[#A1A1AA]">
+                  Landsat/Sentinel derived 30m binary urban extent across the Karachi metropolitan region.
                 </p>
-                <span className="flex items-center gap-1 text-[9px] font-mono text-red-400">
-                  <span className="h-1.5 w-1.5 rounded-full bg-red-400 animate-pulse" />
-                  Map Layer Active
-                </span>
               </div>
-              <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <p className="text-[9px] text-gray-500">P(Urban)</p>
-                  <p className="font-mono text-lg font-bold text-red-400">
-                    {(forecastResult.p_urban * 100).toFixed(1)}%
-                  </p>
+
+              {/* Temporal Summary Card */}
+              <div
+                className="rounded-md p-3 space-y-3"
+                style={{
+                  background: "#141417",
+                  border: "1px solid #26262B",
+                }}
+              >
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] font-mono uppercase tracking-wider text-[#71717A]">
+                    Observed Extent
+                  </span>
+                  <span
+                    className="font-mono text-[12px] font-semibold px-2 py-0.5 rounded"
+                    style={{
+                      background: "rgba(217, 119, 6, 0.15)",
+                      color: "#F59E0B",
+                      border: "1px solid rgba(217, 119, 6, 0.3)",
+                    }}
+                  >
+                    {currentYear}
+                  </span>
                 </div>
+
+                {/* Primary Metric: Observed Area */}
                 <div>
-                  <p className="text-[9px] text-gray-500">Class</p>
-                  <p className="font-mono text-lg font-bold text-red-400">
-                    {forecastResult.urban_class}
-                  </p>
+                  <span className="text-[10px] text-[#71717A] block mb-0.5">
+                    Observed Urban Area
+                  </span>
+                  <div className="flex items-baseline gap-1.5">
+                    <span className="text-[28px] font-mono font-semibold tracking-tight text-[#F4F4F6] leading-none">
+                      {observedAreaKm2}
+                    </span>
+                    <span className="text-[12px] font-mono text-[#A1A1AA]">km²</span>
+                  </div>
                 </div>
-                <div>
-                  <p className="text-[9px] text-gray-500">Growth Clusters</p>
-                  <p className="font-mono text-xs text-red-400 font-semibold">
-                    {forecastResult.patch_count} Zones
-                  </p>
-                </div>
-                <div>
-                  <p className="text-[9px] text-gray-500">Sprawl Area</p>
-                  <p className="font-mono text-xs text-gray-300 font-semibold">
-                    {forecastResult.total_area_km2} km²
-                  </p>
+
+                {/* Secondary Metrics Grid */}
+                <div
+                  className="grid grid-cols-2 gap-2 pt-2.5"
+                  style={{ borderTop: "1px solid #26262B" }}
+                >
+                  <div>
+                    <span className="text-[10px] text-[#71717A] block">Detected Patches</span>
+                    <span className="font-mono text-[13px] font-medium text-[#F4F4F6]">
+                      {observedPatchesCount}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-[10px] text-[#71717A] block">Spatial Resolution</span>
+                    <span className="font-mono text-[13px] font-medium text-[#F4F4F6]">
+                      {spatialResolutionLabel}
+                    </span>
+                  </div>
                 </div>
               </div>
 
-              {forecastData?.features && (
-                <div className="mt-2.5 border-t border-red-500/10 pt-2">
-                  <p className="text-[9px] text-gray-400">
-                    Click any neon-red polygon on the map to inspect local corridor metrics.
-                  </p>
+              {/* Layer Controls: Opacity & Visibility */}
+              <div
+                className="rounded-md p-3 space-y-3"
+                style={{
+                  background: "#141417",
+                  border: "1px solid #26262B",
+                }}
+              >
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-1.5">
+                    <Sliders size={12} className="text-[#A1A1AA]" />
+                    <span className="text-[11px] font-medium text-[#F4F4F6]">
+                      Layer Controls
+                    </span>
+                  </div>
+                  <button
+                    onClick={() => setHistoryVisible(!historyVisible)}
+                    className="p-1 rounded text-[#A1A1AA] hover:text-[#F4F4F6] hover:bg-[#1F1F23] transition-colors"
+                    title={historyVisible ? "Hide history layer" : "Show history layer"}
+                  >
+                    {historyVisible ? <Eye size={14} /> : <EyeOff size={14} className="text-[#71717A]" />}
+                  </button>
+                </div>
+
+                <div>
+                  <div className="flex justify-between text-[10px] mb-1.5">
+                    <span className="text-[#71717A]">Layer Opacity</span>
+                    <span className="font-mono text-[#A1A1AA]">
+                      {Math.round(historyOpacity * 100)}%
+                    </span>
+                  </div>
+                  <input
+                    type="range"
+                    min="0"
+                    max="1"
+                    step="0.05"
+                    value={historyOpacity}
+                    disabled={!historyVisible}
+                    onChange={(e) => setHistoryOpacity(Number(e.target.value))}
+                    className="w-full h-1"
+                    aria-label="Layer opacity slider"
+                  />
+                </div>
+              </div>
+
+              <div className="text-[10px] text-[#71717A] leading-normal pt-1">
+                Tip: Use the bottom dock to scrub through 1995–2025 or toggle time-lapse playback.
+              </div>
+            </div>
+          )}
+
+          {/* === FORECAST WORKFLOW === */}
+          {activeWorkflow === WORKFLOWS.FORECAST && (
+            <div className="px-4 py-3 space-y-3">
+              <p className="text-[11px] text-[#A1A1AA] leading-relaxed">
+                Generate 2030 sprawl prediction using the CDX Logit Fusion model (CNN-LSTM + XGBoost + Contextual Attention).
+              </p>
+
+              <button
+                onClick={fetchForecast}
+                disabled={forecasting || backendStatus !== "online"}
+                className="w-full rounded-md py-2.5 text-[12px] font-semibold transition-all
+                           disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-2
+                           shadow-sm"
+                style={{
+                  background: "#D97706",
+                  color: "#F4F4F6",
+                }}
+                onMouseOver={(e) => {
+                  if (!forecasting && backendStatus === "online") {
+                    e.currentTarget.style.background = "#B45309";
+                  }
+                }}
+                onMouseOut={(e) => {
+                  e.currentTarget.style.background = "#D97706";
+                }}
+              >
+                {forecasting ? (
+                  <>
+                    <span className="inline-block w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                    Running inference…
+                  </>
+                ) : (
+                  <>
+                    <TrendingUp size={14} />
+                    Run 2030 forecast
+                  </>
+                )}
+              </button>
+
+              {backendStatus !== "online" && backendStatus !== null && (
+                <p className="text-[11px] text-[#EF4444]">
+                  Backend server is offline. Run uvicorn backend.main:app to enable forecasts.
+                </p>
+              )}
+
+              {/* Forecast results */}
+              {forecastResult && !forecastResult.error && (
+                <div
+                  className="rounded-md p-3 space-y-3 mt-3"
+                  style={{
+                    background: "#141417",
+                    border: "1px solid #26262B",
+                  }}
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] font-semibold text-[#E06356]">
+                      Forecast {forecastResult.target_year}
+                    </span>
+                    <span className="text-[10px] font-mono text-[#71717A]">
+                      {forecastResult.patch_count} patches
+                    </span>
+                  </div>
+
+                  <div className="space-y-2">
+                    <div className="flex justify-between items-baseline text-[11px]">
+                      <span className="text-[#71717A]">Mean P(Urban)</span>
+                      <span className="font-mono text-[14px] font-semibold text-[#F4F4F6]">
+                        {(forecastResult.p_urban * 100).toFixed(1)}%
+                      </span>
+                    </div>
+                    <div className="flex justify-between text-[11px]">
+                      <span className="text-[#71717A]">Predicted Area</span>
+                      <span className="font-mono text-[#F4F4F6]">
+                        {forecastResult.total_area_km2} km²
+                      </span>
+                    </div>
+                    <div className="flex justify-between text-[11px]">
+                      <span className="text-[#71717A]">Classification</span>
+                      <span className="font-mono text-[#F4F4F6]">
+                        {forecastResult.urban_class}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Expandable Model Details */}
+                  <details className="pt-2 border-t border-[#26262B]">
+                    <summary className="text-[10px] text-[#71717A] cursor-pointer hover:text-[#A1A1AA] transition-colors">
+                      Technical Model Logs
+                    </summary>
+                    <div className="mt-2 space-y-1.5 pl-2 border-l border-[#26262B] text-[10px]">
+                      <div className="flex justify-between">
+                        <span className="text-[#71717A]">L_fused</span>
+                        <span className="font-mono text-[#A1A1AA]">
+                          {forecastResult.l_fused?.toFixed(4) ?? "—"}
+                        </span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-[#71717A]">z_XGB</span>
+                        <span className="font-mono text-[#A1A1AA]">
+                          {forecastResult.z_xgb?.toFixed(4) ?? "—"}
+                        </span>
+                      </div>
+                      {forecastResult.inference_time_ms && (
+                        <div className="flex justify-between">
+                          <span className="text-[#71717A]">Latency</span>
+                          <span className="font-mono text-[#A1A1AA]">
+                            {forecastResult.inference_time_ms} ms
+                          </span>
+                        </div>
+                      )}
+                      {forecastResult.fusion_model && (
+                        <div className="text-[#71717A] pt-1 text-[9px] leading-tight">
+                          {forecastResult.fusion_model}
+                        </div>
+                      )}
+                    </div>
+                  </details>
+                </div>
+              )}
+
+              {forecastResult?.error && (
+                <div
+                  className="rounded-md p-2.5 text-[11px]"
+                  style={{
+                    background: "rgba(239, 68, 68, 0.1)",
+                    border: "1px solid #EF4444",
+                    color: "#EF4444",
+                  }}
+                >
+                  {forecastResult.error}
                 </div>
               )}
             </div>
           )}
 
-          {/* ── Road Simulation Result ───────────────────────────────── */}
-          {simulationResult && (
-            <div className="mt-4 rounded-lg border border-cyan-500/30
-                            bg-cyan-500/[0.05] p-3 shadow-lg shadow-cyan-500/5">
-              <div className="flex items-center justify-between mb-2">
-                <p className="text-[10px] font-semibold uppercase tracking-widest text-cyan-400 font-bold">
-                  What-If Road Impact
-                </p>
-                {simulationData ? (
-                  <span className="flex items-center gap-1 text-[9px] font-mono text-cyan-400">
-                    <span className="h-1.5 w-1.5 rounded-full bg-cyan-400 animate-pulse" />
-                    Delta Layer Active
+          {/* === SIMULATE WORKFLOW === */}
+          {activeWorkflow === WORKFLOWS.SIMULATE && (
+            <div className="px-4 py-3 space-y-3">
+              <p className="text-[11px] text-[#A1A1AA] leading-relaxed">
+                Draw a hypothetical road corridor on the map, then compute the resulting urbanization probability uplift.
+              </p>
+
+              {/* Drawing Toolbar Card */}
+              <div
+                className="rounded-md p-3"
+                style={{
+                  background: "#141417",
+                  border: "1px solid #26262B",
+                }}
+              >
+                <div className="flex items-center justify-between mb-1.5">
+                  <span className="text-[10px] font-mono uppercase tracking-wider text-[#71717A]">
+                    Corridor Status
                   </span>
+                  {drawnRoad && (
+                    <button
+                      onClick={handleDrawDelete}
+                      className="flex items-center gap-1 text-[10px] text-[#EF4444] hover:underline"
+                    >
+                      <RotateCcw size={10} />
+                      Reset
+                    </button>
+                  )}
+                </div>
+
+                {drawnRoad ? (
+                  <div className="flex items-center gap-2 text-[12px] text-[#5B98D4] font-medium">
+                    <Route size={14} />
+                    <span>
+                      Corridor drawn ({drawnRoad.geometry?.coordinates?.length || 2} vertices)
+                    </span>
+                  </div>
                 ) : (
-                  <span className="text-[9px] font-mono font-bold text-cyan-300">
-                    +{((simulationResult.delta_p_urban || 0) * 100).toFixed(2)}% Uplift
-                  </span>
+                  <div>
+                    <p className="text-[11px] text-[#F4F4F6] font-medium">No road active</p>
+                    <p className="text-[10px] text-[#71717A] mt-1">
+                      Use the line tool in the top-right toolbar of the map canvas to trace a proposed road.
+                    </p>
+                  </div>
                 )}
               </div>
-              <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <p className="text-[9px] text-gray-500">Updated P(Urban)</p>
-                  <p className="font-mono text-base font-bold text-cyan-400">
-                    {((simulationResult.updated_p_urban || 0) * 100).toFixed(1)}%
-                  </p>
-                </div>
-                <div>
-                  <p className="text-[9px] text-gray-500">Delta Uplift</p>
-                  <p className="font-mono text-base font-bold text-cyan-300">
-                    +{((simulationResult.delta_p_urban || 0) * 100).toFixed(2)}%
-                  </p>
-                </div>
-                <div>
-                  <p className="text-[9px] text-gray-500">Affected Area</p>
-                  <p className="font-mono text-xs text-gray-200">
-                    {simulationResult.affected_area_cells} cells
-                  </p>
-                </div>
-                <div>
-                  <p className="text-[9px] text-gray-500">Road Pixels</p>
-                  <p className="font-mono text-xs text-gray-300">
-                    {simulationResult.road_pixel_count} px
-                  </p>
-                </div>
-              </div>
-              {simulationData && (
-                <div className="mt-2.5 border-t border-cyan-500/10 pt-2">
-                  <p className="text-[9px] text-gray-400">
-                    Click the neon-blue delta polygon on the map to inspect corridor growth impact.
-                  </p>
+
+              <button
+                onClick={handleSimulateRoad}
+                disabled={simulating || backendStatus !== "online" || !drawnRoad}
+                className="w-full rounded-md py-2.5 text-[12px] font-semibold transition-all
+                           disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                style={{
+                  background: drawnRoad ? "#5B98D4" : "rgba(91, 152, 212, 0.25)",
+                  color: "#F4F4F6",
+                }}
+              >
+                {simulating ? (
+                  <>
+                    <span className="inline-block w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                    Simulating impact…
+                  </>
+                ) : (
+                  <>
+                    <Route size={14} />
+                    Simulate growth delta
+                  </>
+                )}
+              </button>
+
+              {/* Simulation Result */}
+              {simulationResult && !simulationResult.error && (
+                <div
+                  className="rounded-md p-3 space-y-2 mt-3"
+                  style={{
+                    background: "#141417",
+                    border: "1px solid #26262B",
+                  }}
+                >
+                  <span className="text-[11px] font-semibold text-[#5B98D4] block">
+                    Scenario Impact Analysis
+                  </span>
+                  <div className="space-y-1.5 pt-1">
+                    <div className="flex justify-between text-[11px]">
+                      <span className="text-[#71717A]">Updated P(Urban)</span>
+                      <span className="font-mono text-[#F4F4F6] font-semibold">
+                        {((simulationResult.updated_p_urban || 0) * 100).toFixed(1)}%
+                      </span>
+                    </div>
+                    <div className="flex justify-between text-[11px]">
+                      <span className="text-[#71717A]">Delta Uplift</span>
+                      <span className="font-mono text-[#5B98D4] font-semibold">
+                        +{((simulationResult.delta_p_urban || 0) * 100).toFixed(2)}%
+                      </span>
+                    </div>
+                    <div className="flex justify-between text-[11px]">
+                      <span className="text-[#71717A]">Affected Cells</span>
+                      <span className="font-mono text-[#F4F4F6]">
+                        {simulationResult.affected_area_cells}
+                      </span>
+                    </div>
+                    <div className="flex justify-between text-[11px]">
+                      <span className="text-[#71717A]">Influence Radius</span>
+                      <span className="font-mono text-[#F4F4F6]">
+                        {simulationResult.influence_radius_cells} cells
+                      </span>
+                    </div>
+                  </div>
                 </div>
               )}
             </div>
           )}
-
-          {forecastResult?.error && (
-            <div className="mt-4 rounded-lg border border-red-500/20 bg-red-500/[0.04] p-3">
-              <p className="text-xs text-red-400">{forecastResult.error}</p>
-            </div>
-          )}
         </div>
 
-        {/* ── Footer / Forecast & Simulate Buttons ───────────────────── */}
-        <div className="border-t border-green-500/20 px-5 py-4 space-y-2.5">
-          {/* Forecast 2030 button */}
-          <button
-            onClick={fetchForecast}
-            disabled={forecasting || backendStatus !== "online"}
-            className="group relative w-full overflow-hidden rounded-xl
-                       border border-green-500/40 bg-green-500/10
-                       px-4 py-2.5 text-xs font-bold uppercase tracking-wider
-                       text-green-400 shadow-lg shadow-green-500/10
-                       transition-all duration-300
-                       hover:border-green-400 hover:bg-green-500/20
-                       hover:shadow-green-500/25
-                       disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            {/* Animated shimmer */}
-            <div className="absolute inset-0 -translate-x-full bg-gradient-to-r
-                            from-transparent via-green-400/10 to-transparent
-                            transition-transform duration-700
-                            group-hover:translate-x-full" />
-            <span className="relative flex items-center justify-center gap-2">
-              <Radar
-                size={15}
-                className={forecasting ? "animate-spin" : ""}
-              />
-              {forecasting ? "Processing CDX…" : "Forecast 2030"}
-            </span>
-          </button>
-
-          {/* Simulate New Road button (glowing amber) */}
-          <button
-            onClick={handleSimulateRoad}
-            disabled={simulating || backendStatus !== "online"}
-            className="group relative w-full overflow-hidden rounded-xl
-                       border border-amber-500/40 bg-amber-500/10
-                       px-4 py-2.5 text-xs font-bold uppercase tracking-wider
-                       text-amber-400 shadow-lg shadow-amber-500/10
-                       transition-all duration-300
-                       hover:border-amber-400 hover:bg-amber-500/20
-                       hover:shadow-amber-500/25
-                       disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            {/* Animated amber shimmer */}
-            <div className="absolute inset-0 -translate-x-full bg-gradient-to-r
-                            from-transparent via-amber-400/10 to-transparent
-                            transition-transform duration-700
-                            group-hover:translate-x-full" />
-            <span className="relative flex items-center justify-center gap-2">
-              <Route
-                size={15}
-                className={simulating ? "animate-spin" : ""}
-              />
-              {simulating ? "Simulating EDT Field…" : "Simulate New Road"}
-            </span>
-          </button>
-
-          {/* Road drawing status info */}
-          <div className="flex items-center justify-between text-[10px] px-0.5 text-gray-500">
-            <span>What-If Sandbox:</span>
-            {drawnRoad ? (
-              <span className="text-amber-400 font-mono flex items-center gap-1 font-semibold">
-                <span className="h-1.5 w-1.5 rounded-full bg-amber-400 animate-pulse" />
-                Road Drawn ({drawnRoad.geometry?.coordinates?.length || 2} pts)
-              </span>
-            ) : (
-              <span className="text-gray-400 italic">Draw line (top-right)</span>
-            )}
-          </div>
+        {/* ── Precision Coordinate Readout Footer ─────────────────────── */}
+        <div
+          className="flex items-center justify-between px-4 py-2.5 font-mono text-[11px]"
+          style={{
+            borderTop: "1px solid #26262B",
+            background: "#0C0C0E",
+          }}
+        >
+          <span className="text-[#A1A1AA] tracking-tight">
+            {viewState.latitude.toFixed(4)}°N &nbsp; {viewState.longitude.toFixed(4)}°E
+          </span>
+          <span className="text-[#A1A1AA] font-semibold">
+            ZOOM {viewState.zoom.toFixed(1)}
+          </span>
         </div>
       </aside>
 
-      {/* ─── TEMPORAL TIME-LAPSE SLIDER (Bottom Center) ──────────────── */}
-      <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-40 flex flex-col items-center
-                      rounded-2xl border border-green-500/30 bg-black/85 px-6 py-3.5
-                      shadow-2xl shadow-green-500/10 backdrop-blur-2xl
-                      transition-all duration-300 hover:border-green-400/50">
-        {/* Header: Title, Play/Pause toggle, Selected Year readout */}
-        <div className="flex items-center justify-between w-full min-w-[280px] sm:min-w-[360px] mb-2.5">
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={() => setIsPlaying(!isPlaying)}
-              className="flex h-6 w-6 items-center justify-center rounded-md border border-green-500/30
-                         bg-green-500/10 text-green-400 transition-colors hover:bg-green-500/20 hover:text-green-300"
-              title={isPlaying ? "Pause time-lapse" : "Play time-lapse (1995–2025)"}
-              aria-label={isPlaying ? "Pause time-lapse" : "Play time-lapse"}
-            >
-              {isPlaying ? <Pause size={12} /> : <Play size={12} className="ml-0.5" />}
-            </button>
-            <div className="flex items-center gap-1.5">
-              <Clock size={13} className="text-green-400" />
-              <span className="text-[10px] font-bold uppercase tracking-wider text-gray-300">
-                Temporal Time-Lapse
+      {/* ─── MAP LEGEND (Bottom-Left, Above Scale) ───────────────────────── */}
+      <div
+        className="absolute z-30 rounded-md shadow-lg"
+        style={{
+          bottom: "76px",
+          left: panelOpen ? "296px" : "16px",
+          background: "rgba(12, 12, 14, 0.94)",
+          backdropFilter: "blur(8px)",
+          border: "1px solid #26262B",
+          padding: "8px 12px",
+          transition: "left 0.25s cubic-bezier(0.4, 0, 0.2, 1)",
+        }}
+      >
+        <p className="text-[10px] font-mono uppercase tracking-wider text-[#71717A] mb-2 flex items-center gap-1.5">
+          <Layers size={11} />
+          <span>Active Layers</span>
+        </p>
+
+        <div className="space-y-1.5">
+          {/* Historical raster swatch */}
+          {showHistoryLegend && (
+            <div className="flex items-center gap-2">
+              <span
+                className="w-3 h-3 shrink-0 rounded-[2px]"
+                style={{
+                  background: historySwatchColor,
+                  border: `1px solid ${historySwatchColor}`,
+                  opacity: historyOpacity,
+                }}
+              />
+              <span className="text-[11px] text-[#A1A1AA]">
+                Observed Urban Extent ({historyData.year})
               </span>
             </div>
-          </div>
+          )}
 
-          <div className="flex items-baseline gap-1.5 bg-green-500/10 px-2.5 py-0.5 rounded border border-green-500/25">
-            <span className="text-[10px] text-gray-400 font-mono">Year:</span>
-            <span className="font-mono text-base font-extrabold text-green-400 tracking-wider">
-              {currentYear}
-            </span>
-          </div>
-        </div>
+          {/* Forecast raster swatch */}
+          {forecastData && (activeWorkflow === WORKFLOWS.FORECAST || !historyData) && (
+            <div className="flex items-center gap-2">
+              <span
+                className="w-3 h-3 shrink-0 rounded-[2px]"
+                style={{
+                  background: "#E06356",
+                  border: "1px solid #EF4444",
+                  opacity: 0.8,
+                }}
+              />
+              <span className="text-[11px] text-[#A1A1AA]">
+                Predicted Expansion (2030)
+              </span>
+            </div>
+          )}
 
-        {/* Range slider */}
-        <input
-          type="range"
-          min="1995"
-          max="2025"
-          step="5"
-          value={currentYear}
-          onChange={(e) => {
-            setCurrentYear(Number(e.target.value));
-            if (isPlaying) setIsPlaying(false);
-            if (forecastData) setForecastData(null);
-          }}
-          className="w-full min-w-[280px] sm:min-w-[360px] h-2 cursor-pointer appearance-none rounded-lg bg-gray-800 accent-green-400 transition-all hover:bg-gray-700 focus:outline-none"
-          aria-label="Temporal urban growth year slider"
-        />
+          {/* Scenario delta swatch */}
+          {simulationData && activeWorkflow === WORKFLOWS.SIMULATE && (
+            <div className="flex items-center gap-2">
+              <span
+                className="w-3 h-3 shrink-0 rounded-[2px]"
+                style={{
+                  background: "#5B98D4",
+                  border: "1px solid #60A5FA",
+                  opacity: 0.85,
+                }}
+              />
+              <span className="text-[11px] text-[#A1A1AA]">
+                Simulated Growth Delta
+              </span>
+            </div>
+          )}
 
-        {/* Year tick markers */}
-        <div className="flex justify-between w-full text-[10px] font-mono text-gray-500 mt-2 px-0.5">
-          {["1995", "2000", "2005", "2010", "2015", "2020", "2025"].map((yr) => (
-            <button
-              key={yr}
-              type="button"
-              onClick={() => {
-                setCurrentYear(Number(yr));
-                if (isPlaying) setIsPlaying(false);
-                if (forecastData) setForecastData(null);
-              }}
-              className={`transition-all ${
-                currentYear === Number(yr)
-                  ? "font-bold text-green-400 scale-110"
-                  : "text-gray-400 hover:text-gray-200"
-              }`}
-            >
-              {yr}
-            </button>
-          ))}
+          {!showHistoryLegend &&
+            !(forecastData && (activeWorkflow === WORKFLOWS.FORECAST || !historyData)) &&
+            !(simulationData && activeWorkflow === WORKFLOWS.SIMULATE) && (
+              <span className="text-[11px] text-[#71717A]">
+                No layers visible
+              </span>
+            )}
         </div>
       </div>
 
-      {/* ─── MAP WATERMARK / BRANDING ─────────────────────────────────── */}
-      <div className="absolute bottom-5 right-14 z-30 flex items-center gap-2
-                      rounded-lg bg-black/50 px-3 py-1.5 backdrop-blur-md">
-        <div className="h-1.5 w-1.5 rounded-full bg-green-400 shadow-sm shadow-green-400" />
-        <span className="text-[10px] font-medium tracking-wider text-gray-400">
-          AKS-E-SHAJR
-        </span>
+      {/* ─── BOTTOM FLOATING TIMELINE DOCK (Single Source of Truth) ────── */}
+      <div
+        className="absolute z-40 flex justify-center pointer-events-none"
+        style={{
+          bottom: "24px",
+          left: panelOpen ? "280px" : "0",
+          right: "0",
+          transition: "left 0.25s cubic-bezier(0.4, 0, 0.2, 1)",
+        }}
+      >
+        <div
+          className="pointer-events-auto flex items-center gap-3 w-full"
+          style={{
+            maxWidth: "680px",
+            margin: "0 24px",
+            background: "rgba(12, 12, 14, 0.94)",
+            backdropFilter: "blur(12px)",
+            borderRadius: "8px",
+            border: "1px solid #26262B",
+            padding: "8px 16px",
+            boxShadow: "0 6px 24px rgba(0, 0, 0, 0.5)",
+          }}
+        >
+          {/* Play/Pause Button */}
+          <button
+            onClick={() => setIsPlaying(!isPlaying)}
+            className="flex items-center justify-center rounded p-1.5 transition-colors hover:bg-[#1F1F23]"
+            style={{ color: isPlaying ? "#F59E0B" : "#A1A1AA" }}
+            title={isPlaying ? "Pause time-lapse" : "Play 1995–2025 time-lapse"}
+            aria-label={isPlaying ? "Pause time-lapse" : "Play time-lapse"}
+          >
+            {isPlaying ? <Pause size={15} /> : <Play size={15} />}
+          </button>
+
+          {/* Current Year Badge */}
+          <span
+            className="font-mono text-[14px] font-semibold min-w-[44px] text-center"
+            style={{ color: "#F4F4F6" }}
+          >
+            {currentYear}
+          </span>
+
+          {/* Year Range Slider */}
+          <input
+            type="range"
+            min="1995"
+            max="2025"
+            step="5"
+            value={currentYear}
+            onChange={(e) => {
+              setCurrentYear(Number(e.target.value));
+              if (isPlaying) setIsPlaying(false);
+            }}
+            className="flex-1"
+            aria-label="Temporal scrubber"
+          />
+
+          {/* Quick-jump Year Ticks */}
+          <div className="hidden sm:flex items-center gap-1">
+            {TIMELINE_YEARS.map((yr) => {
+              const isSelected = currentYear === yr;
+              return (
+                <button
+                  key={yr}
+                  onClick={() => {
+                    setCurrentYear(yr);
+                    if (isPlaying) setIsPlaying(false);
+                  }}
+                  className="px-1.5 py-0.5 rounded text-[11px] font-mono transition-colors"
+                  style={{
+                    color: isSelected ? "#F59E0B" : "#71717A",
+                    fontWeight: isSelected ? 600 : 400,
+                    background: isSelected ? "rgba(217, 119, 6, 0.15)" : "transparent",
+                  }}
+                >
+                  {yr}
+                </button>
+              );
+            })}
+          </div>
+        </div>
       </div>
     </div>
   );

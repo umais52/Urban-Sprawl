@@ -1,0 +1,11 @@
+# Backend runtime for Urban Sprawl Detection API.
+# Versions match the project venv used to develop this service.
+fastapi==0.143.0
+uvicorn==0.54.0
+pydantic==2.14.0
+numpy==2.4.6
+rasterio==1.4.4
+scipy==1.17.1
+Pillow==13.0.0
+xgboost==3.2.0
+tensorflow==2.21.0

@@ -66,6 +66,11 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator
 
+try:
+    from services.raster_overlay import load_history_overlay
+except ImportError:  # `uvicorn backend.main:app` from the repo root
+    from backend.services.raster_overlay import load_history_overlay
+
 logger = logging.getLogger("uvicorn.error")
 
 
@@ -868,7 +873,7 @@ def get_forecast_layer(
     return {
         "type": "FeatureCollection",
         "metadata": {
-            "title": "Aks-e-Shajr CDX Real Dynamic AI Sprawl Forecast 2030",
+            "title": "Sprawl Vision Real Dynamic AI Sprawl Forecast 2030",
             "city": "Karachi",
             "projection_year": 2030,
             "fusion_model": "CDX Logit Fusion (CNN-LSTM 40% + XGBoost 40% + CA 20%)",
@@ -886,112 +891,41 @@ def get_forecast_layer(
 
 # ---------------------------------------------------------------------------
 # TEMPORAL TIME-LAPSE -- GET /api/v1/history/{year}
-# Strictly extracts real raster pixel shapes from Karachi_Urban_2020.tif
+# Full-resolution RGBA overlay of Karachi_Urban_{year}.tif (arr == 1).
 # ---------------------------------------------------------------------------
+_HISTORY_YEARS = (1995, 2000, 2005, 2010, 2015, 2020, 2025)
+
+
 @app.get("/api/v1/history/{year}")
 def get_history_layer(year: int) -> dict[str, Any]:
     """
     **Temporal Urban Growth History Endpoint**
 
-    Dynamically extracts real raster pixel polygons from Karachi_Urban_2020.tif
-    using temporal morphological sequence modeling for a given year (1995 to 2025).
-    Zero mock/dummy coordinates used.
+    Returns every urban pixel in ``Karachi_Urban_{year}.tif`` as a transparent
+    RGBA PNG positioned for a Mapbox GL JS image source. Area and patch counts
+    are measured on the native EPSG:32642 grid. No morphological filtering.
     """
-    clamped_year = max(1995, min(2025, int(year)))
+    if year not in _HISTORY_YEARS:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"No historical raster for {year}. "
+                f"Expected one of {list(_HISTORY_YEARS)}."
+            ),
+        )
 
-    # If year is 2030 (or beyond) and models are loaded, delegate to the real 2030 forecast layer
-    if clamped_year >= 2030 and registry.xgboost_model and registry.cnn_lstm_model:
-        return get_forecast_layer()
+    raster_file = _DATA_DIR / f"Karachi_Urban_{year}.tif"
+    if not raster_file.is_file():
+        raise HTTPException(
+            status_code=503,
+            detail=f"Raster file not found at {raster_file}",
+        )
 
-    # Prefer the exact historical raster file for the year if present
-    yr_file = _DATA_DIR / f"Karachi_Urban_{clamped_year}.tif"
-    if yr_file.exists():
-        raster_file = yr_file
-        erode_steps = 0
-    else:
-        raster_file = _RASTER_2020_PATH if _RASTER_2020_PATH.exists() else _RASTER_PATH
-        if not raster_file.exists():
-            alt = _PROJECT_ROOT / "backend" / "data" / "Karachi_Urban_2020.tif"
-            if alt.exists():
-                raster_file = alt
-            else:
-                raise HTTPException(
-                    status_code=503,
-                    detail=f"Raster file not found at {raster_file}",
-                )
-        erode_steps = max(0, min(5, (2020 - clamped_year) // 5))
-
-    features: list[dict[str, Any]] = []
-    total_area = 0.0
-
-    with rasterio.open(str(raster_file)) as src:
-        src_crs = src.crs
-        for c in DEFAULT_CORRIDORS:
-            half = 32
-            row_start = max(0, min(src.height - 64, c["row_center"] - half))
-            col_start = max(0, min(src.width - 64, c["col_center"] - half))
-            win = Window(col_start, row_start, 64, 64)
-            patch = src.read(1, window=win).astype(np.uint8)
-            win_transform = src.window_transform(win)
-
-            if erode_steps > 0:
-                hist_mask = binary_erosion(patch, iterations=erode_steps).astype(np.uint8)
-            else:
-                hist_mask = patch
-
-            # Extract real jagged raster shapes
-            raw_shapes = [
-                (geom, val)
-                for geom, val in shapes(hist_mask, mask=(hist_mask == 1), transform=win_transform)
-                if val == 1
-            ]
-
-            if len(raw_shapes) > 1:
-                filtered_shapes = [s for s in raw_shapes if len(s[0]["coordinates"][0]) >= 6]
-                if filtered_shapes:
-                    raw_shapes = filtered_shapes
-
-            corridor_cells = int(hist_mask.sum())
-            corridor_area_km2 = round(corridor_cells * 900.0 / 1e6, 2)
-            total_area += corridor_area_km2
-
-            for poly_idx, (geom, val) in enumerate(raw_shapes):
-                wgs84_geom = transform_geom(src_crs, "EPSG:4326", geom)
-                sub_area = round(max(0.05, corridor_area_km2 / max(1, len(raw_shapes))), 2)
-
-                features.append({
-                    "type": "Feature",
-                    "id": f"{c['id']}_{clamped_year}_{poly_idx}",
-                    "properties": {
-                        "name": c["name"],
-                        "corridor": c["corridor"],
-                        "year": clamped_year,
-                        "p_urban": round(0.92 - 0.04 * erode_steps, 2),
-                        "area_km2": sub_area,
-                        "stage": (
-                            "Historic Urban Core"
-                            if clamped_year <= 2000
-                            else "Suburban Infill"
-                            if clamped_year <= 2015
-                            else "Metropolitan Sprawl"
-                        ),
-                        "vertices_count": len(wgs84_geom.get("coordinates", [[]])[0]),
-                        "source": "Real Raster Shapes (Karachi_Urban_2020.tif)",
-                    },
-                    "geometry": wgs84_geom,
-                })
-
-    return {
-        "type": "FeatureCollection",
-        "metadata": {
-            "city": "Karachi",
-            "year": clamped_year,
-            "total_area_km2": round(total_area, 1),
-            "patches_count": len(features),
-            "source": "Dynamically Extracted from Karachi_Urban_2020.tif",
-        },
-        "features": features,
-    }
+    return load_history_overlay(
+        year,
+        str(raster_file),
+        raster_file.stat().st_mtime_ns,
+    )
 
 
 # ---------------------------------------------------------------------------

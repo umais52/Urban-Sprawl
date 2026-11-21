@@ -26,3 +26,9 @@ Thumbs.db
 *.keras
 # Urban_Sprawl_XGB.json is 2.5MB so it's fine, but .keras is small too (149KB). The .tif is 111KB. 
 # They are small enough for this specific project. I will uncomment them if the user wants them tracked.
+graphify-out/
+
+# Generated History raster overlay cache (PNG/JSON, rebuilt from the GeoTIFFs)
+backend/cache/
+
+

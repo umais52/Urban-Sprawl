@@ -1,20 +1,42 @@
 /* ═══════════════════════════════════════════════════════════════════════════
    Tailwind CSS v4 — CSS-first configuration
-   Urban Sprawl / Aks-e-Shajr CDX
+   Sprawl Vision — Urban Sprawl Intelligence & Forecasting
    ═══════════════════════════════════════════════════════════════════════════ */
 @import "tailwindcss";
 
-/* ── Custom theme tokens ─────────────────────────────────────────────────── */
+/* ── Design tokens: Strict Carbon / Zinc Neutrals (Zero Blue Undertones) ── */
 @theme {
-  /* Neon-green accent palette */
-  --color-neon: #39ff14;
-  --color-neon-dim: #39ff1480;
-  --color-neon-glow: #39ff1433;
+  /* Carbon / zinc surfaces */
+  --color-surface-0: #0C0C0E;
+  --color-surface-1: #141417;
+  --color-surface-2: #1A1A1E;
+  --color-surface-3: #222227;
+  --color-surface-hover: #1F1F23;
 
-  /* Dark background tiers */
-  --color-surface-0: #050505;
-  --color-surface-1: #0a0a0f;
-  --color-surface-2: #12121a;
+  /* Text hierarchy */
+  --color-text-primary: #F4F4F6;
+  --color-text-secondary: #A1A1AA;
+  --color-text-tertiary: #71717A;
+
+  /* Thematic layer colors */
+  --color-history: #D97706;
+  --color-history-highlight: #F59E0B;
+  --color-forecast: #E06356;
+  --color-simulation: #5B98D4;
+
+  /* UI analytical accent — unified amber/ochre matching active urban raster */
+  --color-accent: #D97706;
+  --color-accent-hover: #B45309;
+  --color-accent-highlight: #F59E0B;
+
+  /* Status */
+  --color-success: #10B981;
+  --color-warning: #F59E0B;
+  --color-error: #EF4444;
+
+  /* Borders & Dividers */
+  --color-border: #26262B;
+  --color-border-strong: #33333A;
 
   /* Font stack */
   --font-sans: "Inter", "Segoe UI", system-ui, sans-serif;
@@ -37,40 +59,60 @@ body,
   width: 100%;
   overflow: hidden;
   background: var(--color-surface-0);
-  color: #e5e7eb;
+  color: var(--color-text-primary);
   font-family: var(--font-sans);
+  font-size: 13px;
+  line-height: 1.5;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
 
-/* ── Mapbox GL overrides (keep controls consistent with dark theme) ──────── */
+/* ── Mapbox GL overrides — crisp, professional controls ─────────────────── */
 .mapboxgl-ctrl-group {
-  background: rgba(0, 0, 0, 0.65) !important;
-  border: 1px solid rgba(57, 255, 20, 0.15) !important;
-  backdrop-filter: blur(12px);
-  border-radius: 10px !important;
+  background: #141417 !important;
+  border: 1px solid #26262B !important;
+  border-radius: 6px !important;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4) !important;
 }
 
 .mapboxgl-ctrl-group button {
-  border-color: rgba(255, 255, 255, 0.06) !important;
+  border-color: #26262B !important;
+  width: 32px !important;
+  height: 32px !important;
+  background-color: #141417 !important;
+  transition: background-color 0.15s ease;
+}
+
+.mapboxgl-ctrl-group button:hover {
+  background-color: #1F1F23 !important;
 }
 
 .mapboxgl-ctrl-group button+button {
-  border-top-color: rgba(255, 255, 255, 0.06) !important;
+  border-top-color: #26262B !important;
 }
 
 .mapboxgl-ctrl-group button span {
-  filter: invert(1) brightness(1.8);
+  filter: invert(1) brightness(1.2);
 }
 
 .mapboxgl-ctrl-scale {
-  background: rgba(0, 0, 0, 0.5) !important;
-  color: rgba(57, 255, 20, 0.7) !important;
-  border-color: rgba(57, 255, 20, 0.25) !important;
+  background: rgba(12, 12, 14, 0.92) !important;
+  color: #A1A1AA !important;
+  border: 1px solid #26262B !important;
   font-family: var(--font-mono);
   font-size: 10px !important;
   border-radius: 4px !important;
-  backdrop-filter: blur(8px);
+  padding: 1px 6px !important;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3) !important;
+}
+
+.mapboxgl-ctrl-attrib {
+  background: transparent !important;
+  font-size: 10px !important;
+}
+
+.mapboxgl-ctrl-attrib a {
+  color: #71717A !important;
 }
 
 /* ── Ensure react-map-gl v8 children wrapper does not swallow canvas mouse/touch events ── */
@@ -84,17 +126,24 @@ div[mapboxgl-children]>* {
 
 /* ── Mapbox Draw Controls ── */
 .mapboxgl-ctrl-top-right {
-  z-index: 10;
+  z-index: 20;
 }
 
 .mapbox-gl-draw_ctrl-draw-btn {
   cursor: pointer;
   pointer-events: auto;
+  background-color: #141417 !important;
+  border-color: #26262B !important;
 }
 
-/* ── Scrollbar (thin, neon-accented) ──────────────────────────────────────── */
+.mapbox-gl-draw_ctrl-draw-btn:hover {
+  background-color: #1F1F23 !important;
+}
+
+/* ── Scrollbar — thin, neutral carbon ────────────────────────────────────── */
 ::-webkit-scrollbar {
-  width: 4px;
+  width: 5px;
+  height: 5px;
 }
 
 ::-webkit-scrollbar-track {
@@ -102,10 +151,94 @@ div[mapboxgl-children]>* {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: rgba(57, 255, 20, 0.2);
-  border-radius: 4px;
+  background: #26262B;
+  border-radius: 3px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(57, 255, 20, 0.4);
+  background: #33333A;
+}
+
+/* ── Mapbox popup overrides ──────────────────────────────────────────────── */
+.mapboxgl-popup-content {
+  background: #141417 !important;
+  border: 1px solid #26262B !important;
+  border-radius: 6px !important;
+  padding: 0 !important;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5) !important;
+  color: #F4F4F6 !important;
+}
+
+.mapboxgl-popup-close-button {
+  color: #71717A !important;
+  font-size: 16px !important;
+  padding: 4px 8px !important;
+  right: 2px !important;
+  top: 2px !important;
+}
+
+.mapboxgl-popup-close-button:hover {
+  color: #F4F4F6 !important;
+  background: transparent !important;
+}
+
+.mapboxgl-popup-tip {
+  border-top-color: #141417 !important;
+}
+
+/* ── Range input styling (unified amber accent) ─────────────────────────── */
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+  cursor: pointer;
+}
+
+input[type="range"]::-webkit-slider-runnable-track {
+  height: 4px;
+  background: #26262B;
+  border-radius: 2px;
+}
+
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  background: #F59E0B;
+  border: 2px solid #0C0C0E;
+  border-radius: 50%;
+  margin-top: -5px;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
+  transition: transform 0.1s ease, background 0.15s ease;
+}
+
+input[type="range"]:hover::-webkit-slider-thumb {
+  background: #FBBF24;
+  transform: scale(1.15);
+}
+
+input[type="range"]::-moz-range-track {
+  height: 4px;
+  background: #26262B;
+  border-radius: 2px;
+  border: none;
+}
+
+input[type="range"]::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  background: #F59E0B;
+  border: 2px solid #0C0C0E;
+  border-radius: 50%;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
+}
+
+input[type="range"]:focus {
+  outline: none;
+}
+
+/* ── Utility: transition for panel open/close ────────────────────────────── */
+.panel-transition {
+  transition: width 0.25s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.2s ease, transform 0.25s cubic-bezier(0.4, 0, 0.2, 1);
 }

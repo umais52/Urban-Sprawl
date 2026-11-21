@@ -22,8 +22,10 @@ export const postForecast = (payload) => api.post("/forecast", payload);
 /** CDX Point 8 – Fetch GeoJSON forecast growth polygon layer */
 export const getForecastLayer = () => api.get("/forecast_layer");
 
-/** Temporal History – Fetch GeoJSON urban sprawl layer for a specific year */
-export const getHistory = (year) => api.get(`/history/${year}`);
+/** Temporal History – full-resolution urban raster overlay for one year.
+ *  Cold reprojection of a city-wide GeoTIFF can exceed the shared 30s client timeout. */
+export const getHistory = (year) =>
+  api.get(`/history/${year}`, { timeout: 120_000 });
 
 /** CDX Point 3 – Fetch Markov demand matrix */
 export const getDemand = () => api.get("/demand");
