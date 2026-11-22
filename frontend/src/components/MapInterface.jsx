@@ -143,8 +143,9 @@ export default function MapInterface() {
   const [forecasting, setForecasting] = useState(false);
   const [forecastResult, setForecastResult] = useState(null);
 
-  // Forecast GeoJSON layer state
+  // Forecast raster overlay
   const [forecastData, setForecastData] = useState(null);
+  const [forecastOpacity, setForecastOpacity] = useState(0.85);
   const [popupInfo, setPopupInfo] = useState(null);
 
   // Temporal Time-Lapse state
@@ -231,6 +232,11 @@ export default function MapInterface() {
     return () => clearInterval(interval);
   }, [isPlaying]);
 
+  // Stop history playback when the forecast overlay is the active map.
+  useEffect(() => {
+    if (activeWorkflow === WORKFLOWS.FORECAST) setIsPlaying(false);
+  }, [activeWorkflow]);
+
   // ── Forecast handler ─────────────────────────────────────────────────────
   const fetchForecast = useCallback(async () => {
     setForecasting(true);
@@ -239,32 +245,24 @@ export default function MapInterface() {
     try {
       const { data } = await getForecastLayer();
       setForecastData(data);
-
-      const totalArea =
-        data.metadata?.total_area_km2 ??
-        data.features?.reduce(
-          (acc, f) => acc + (f.properties?.area_km2 || 0),
-          0
-        ) ?? 0;
-      const meanP = data.metadata?.mean_p_urban ?? 0.814;
-
       setForecastResult({
-        p_urban: meanP,
-        urban_class: "Urban",
-        l_fused: data.metadata?.mean_l_fused ?? 0.916258,
-        z_xgb: data.metadata?.mean_z_xgb ?? 0.753772,
-        patch_count: data.features?.length || 5,
-        total_area_km2: Number(totalArea).toFixed(1),
-        target_year: data.metadata?.projection_year || 2030,
-        inference_time_ms: data.metadata?.inference_time_ms,
-        threshold: data.metadata?.threshold,
-        fusion_model: data.metadata?.fusion_model,
+        p_urban: data.mean_p_urban,
+        urban_class: data.classification || "Urban",
+        predicted_area_km2: data.predicted_area_km2,
+        new_expansion_km2: data.new_expansion_km2,
+        baseline_area_km2: data.baseline_area_km2,
+        patches: data.patches,
+        expansion_patches: data.expansion_patches,
+        target_year: data.year || 2030,
+        logs: Array.isArray(data.logs) ? data.logs : [],
       });
 
-      // Smoothly animate camera to frame the Karachi eastern/northern growth frontier
-      if (mapRef.current) {
+      const corners = data.coordinates;
+      if (mapRef.current && corners?.length === 4) {
+        const lng = (corners[0][0] + corners[1][0]) / 2;
+        const lat = (corners[0][1] + corners[2][1]) / 2;
         mapRef.current.flyTo({
-          center: [67.24, 25.02],
+          center: [lng, lat],
           zoom: 10.2,
           pitch: 0,
           duration: 1600,
@@ -369,8 +367,7 @@ export default function MapInterface() {
     const feature = evt.features && evt.features[0];
     if (
       feature &&
-      (feature.layer.id === "forecast-polygons-fill" ||
-        feature.layer.id === "simulation-polygons-fill")
+      feature.layer.id === "simulation-polygons-fill"
     ) {
       setPopupInfo({
         longitude: evt.lngLat.lng,
@@ -384,37 +381,16 @@ export default function MapInterface() {
   }, []);
 
   const getLayerLabel = (layerId) => {
-    if (layerId === "forecast-polygons-fill") return "Forecast";
     if (layerId === "simulation-polygons-fill") return "Scenario";
     return "Observed";
   };
 
   const getLayerColor = (layerId) => {
-    if (layerId === "forecast-polygons-fill") return "#E06356";
     if (layerId === "simulation-polygons-fill") return "#5B98D4";
     return "#D97706";
   };
 
-  // ── Forecast and simulation styles stay on GeoJSON fill/line layers ─────
-  const forecastFillLayer = {
-    id: "forecast-polygons-fill",
-    type: "fill",
-    paint: {
-      "fill-color": "#E06356",
-      "fill-opacity": 0.45,
-    },
-  };
-
-  const forecastOutlineLayer = {
-    id: "forecast-polygons-outline",
-    type: "line",
-    paint: {
-      "line-color": "#E06356",
-      "line-width": 1.5,
-      "line-opacity": 0.85,
-    },
-  };
-
+  // ── Simulation stays on GeoJSON fill/line layers ────────────────────────
   const simulationFillLayer = {
     id: "simulation-polygons-fill",
     type: "fill",
@@ -454,6 +430,10 @@ export default function MapInterface() {
   const showHistoryLegend =
     activeWorkflow === WORKFLOWS.HISTORY && Boolean(historyData?.image_url) && historyVisible;
   const historySwatchColor = historyData?.color || HISTORY_SWATCH_FALLBACK;
+  const showForecastLegend =
+    activeWorkflow === WORKFLOWS.FORECAST && Boolean(forecastData?.image_url);
+  const forecastBaselineSwatch = forecastData?.baseline_color || "#D97706";
+  const forecastExpansionSwatch = forecastData?.expansion_color || "#EF4444";
 
   return (
     <div
@@ -467,10 +447,7 @@ export default function MapInterface() {
         onMove={(evt) => setViewState(evt.viewState)}
         onClick={handleMapClick}
         onLoad={handleMapLoad}
-        interactiveLayerIds={[
-          "forecast-polygons-fill",
-          "simulation-polygons-fill",
-        ]}
+        interactiveLayerIds={["simulation-polygons-fill"]}
         mapboxAccessToken={MAPBOX_TOKEN}
         mapStyle={ACTIVE_MAP_STYLE}
         style={{ width: "100%", height: "100%" }}
@@ -511,11 +488,24 @@ export default function MapInterface() {
           </Source>
         )}
 
-        {/* ─── CDX Forecast Growth Layer ─── */}
-        {forecastData && (
-          <Source id="forecast-layer-source" type="geojson" data={forecastData}>
-            <Layer {...forecastFillLayer} />
-            <Layer {...forecastOutlineLayer} />
+        {/* ─── 2030 forecast raster (Forecast tab only) ─── */}
+        {activeWorkflow === WORKFLOWS.FORECAST && forecastData?.image_url && (
+          <Source
+            id="forecast-urban-source"
+            type="image"
+            url={forecastData.image_url}
+            coordinates={forecastData.coordinates}
+          >
+            <Layer
+              id="forecast-urban-layer"
+              type="raster"
+              beforeId={labelLayerId || undefined}
+              paint={{
+                "raster-opacity": forecastOpacity,
+                "raster-resampling": "nearest",
+                "raster-fade-duration": 0,
+              }}
+            />
           </Source>
         )}
 
@@ -948,66 +938,77 @@ export default function MapInterface() {
                   }}
                 >
                   <div className="flex items-center justify-between">
-                    <span className="text-[11px] font-semibold text-[#E06356]">
+                    <span className="text-[11px] font-semibold text-[#EF4444]">
                       Forecast {forecastResult.target_year}
                     </span>
                     <span className="text-[10px] font-mono text-[#71717A]">
-                      {forecastResult.patch_count} patches
+                      {forecastResult.patches == null ? "—" : formatCount(forecastResult.patches)} patches
                     </span>
                   </div>
 
                   <div className="space-y-2">
-                    <div className="flex justify-between items-baseline text-[11px]">
+                    <div>
+                      <span className="text-[10px] text-[#71717A] block">Total Predicted Area (2030)</span>
+                      <span className="font-mono text-[22px] font-semibold text-[#F4F4F6]">
+                        {forecastResult.predicted_area_km2 == null
+                          ? "—"
+                          : formatKm2(forecastResult.predicted_area_km2)}
+                        <span className="text-[12px] text-[#A1A1AA] ml-1">km²</span>
+                      </span>
+                    </div>
+                    <div className="flex justify-between text-[11px]">
+                      <span className="text-[#71717A]">New Expansion</span>
+                      <span className="font-mono text-[#EF4444]">
+                        {forecastResult.new_expansion_km2 == null
+                          ? "—"
+                          : `+${formatKm2(forecastResult.new_expansion_km2)} km²`}
+                      </span>
+                    </div>
+                    <div className="flex justify-between text-[11px]">
+                      <span className="text-[#71717A]">Detected Patches</span>
+                      <span className="font-mono text-[#F4F4F6]">
+                        {forecastResult.patches == null ? "—" : formatCount(forecastResult.patches)}
+                      </span>
+                    </div>
+                    <div className="flex justify-between text-[11px]">
                       <span className="text-[#71717A]">Mean P(Urban)</span>
-                      <span className="font-mono text-[14px] font-semibold text-[#F4F4F6]">
-                        {(forecastResult.p_urban * 100).toFixed(1)}%
-                      </span>
-                    </div>
-                    <div className="flex justify-between text-[11px]">
-                      <span className="text-[#71717A]">Predicted Area</span>
                       <span className="font-mono text-[#F4F4F6]">
-                        {forecastResult.total_area_km2} km²
-                      </span>
-                    </div>
-                    <div className="flex justify-between text-[11px]">
-                      <span className="text-[#71717A]">Classification</span>
-                      <span className="font-mono text-[#F4F4F6]">
-                        {forecastResult.urban_class}
+                        {forecastResult.p_urban == null
+                          ? "—"
+                          : `${(forecastResult.p_urban * 100).toFixed(1)}%`}
                       </span>
                     </div>
                   </div>
 
-                  {/* Expandable Model Details */}
+                  <div>
+                    <div className="flex justify-between text-[10px] mb-1.5">
+                      <span className="text-[#71717A]">Layer Opacity</span>
+                      <span className="font-mono text-[#A1A1AA]">
+                        {Math.round(forecastOpacity * 100)}%
+                      </span>
+                    </div>
+                    <input
+                      type="range"
+                      min="0"
+                      max="1"
+                      step="0.05"
+                      value={forecastOpacity}
+                      onChange={(e) => setForecastOpacity(Number(e.target.value))}
+                      className="w-full h-1"
+                      aria-label="Forecast layer opacity"
+                    />
+                  </div>
+
                   <details className="pt-2 border-t border-[#26262B]">
                     <summary className="text-[10px] text-[#71717A] cursor-pointer hover:text-[#A1A1AA] transition-colors">
                       Technical Model Logs
                     </summary>
-                    <div className="mt-2 space-y-1.5 pl-2 border-l border-[#26262B] text-[10px]">
-                      <div className="flex justify-between">
-                        <span className="text-[#71717A]">L_fused</span>
-                        <span className="font-mono text-[#A1A1AA]">
-                          {forecastResult.l_fused?.toFixed(4) ?? "—"}
-                        </span>
-                      </div>
-                      <div className="flex justify-between">
-                        <span className="text-[#71717A]">z_XGB</span>
-                        <span className="font-mono text-[#A1A1AA]">
-                          {forecastResult.z_xgb?.toFixed(4) ?? "—"}
-                        </span>
-                      </div>
-                      {forecastResult.inference_time_ms && (
-                        <div className="flex justify-between">
-                          <span className="text-[#71717A]">Latency</span>
-                          <span className="font-mono text-[#A1A1AA]">
-                            {forecastResult.inference_time_ms} ms
-                          </span>
-                        </div>
-                      )}
-                      {forecastResult.fusion_model && (
-                        <div className="text-[#71717A] pt-1 text-[9px] leading-tight">
-                          {forecastResult.fusion_model}
-                        </div>
-                      )}
+                    <div className="mt-2 space-y-1 pl-2 border-l border-[#26262B] text-[10px]">
+                      {(forecastResult.logs || []).map((line) => (
+                        <p key={line} className="font-mono text-[#A1A1AA] leading-snug break-words">
+                          {line}
+                        </p>
+                      ))}
                     </div>
                   </details>
                 </div>
@@ -1195,21 +1196,35 @@ export default function MapInterface() {
             </div>
           )}
 
-          {/* Forecast raster swatch */}
-          {forecastData && (activeWorkflow === WORKFLOWS.FORECAST || !historyData) && (
-            <div className="flex items-center gap-2">
-              <span
-                className="w-3 h-3 shrink-0 rounded-[2px]"
-                style={{
-                  background: "#E06356",
-                  border: "1px solid #EF4444",
-                  opacity: 0.8,
-                }}
-              />
-              <span className="text-[11px] text-[#A1A1AA]">
-                Predicted Expansion (2030)
-              </span>
-            </div>
+          {showForecastLegend && (
+            <>
+              <div className="flex items-center gap-2">
+                <span
+                  className="w-3 h-3 shrink-0 rounded-[2px]"
+                  style={{
+                    background: forecastBaselineSwatch,
+                    border: `1px solid ${forecastBaselineSwatch}`,
+                    opacity: 0.57,
+                  }}
+                />
+                <span className="text-[11px] text-[#A1A1AA]">
+                  Existing Urban Baseline (2025)
+                </span>
+              </div>
+              <div className="flex items-center gap-2">
+                <span
+                  className="w-3 h-3 shrink-0 rounded-[2px]"
+                  style={{
+                    background: forecastExpansionSwatch,
+                    border: `1px solid ${forecastExpansionSwatch}`,
+                    opacity: forecastOpacity,
+                  }}
+                />
+                <span className="text-[11px] text-[#A1A1AA]">
+                  Predicted Expansion (2030)
+                </span>
+              </div>
+            </>
           )}
 
           {/* Scenario delta swatch */}
@@ -1230,7 +1245,7 @@ export default function MapInterface() {
           )}
 
           {!showHistoryLegend &&
-            !(forecastData && (activeWorkflow === WORKFLOWS.FORECAST || !historyData)) &&
+            !showForecastLegend &&
             !(simulationData && activeWorkflow === WORKFLOWS.SIMULATE) && (
               <span className="text-[11px] text-[#71717A]">
                 No layers visible
@@ -1239,7 +1254,8 @@ export default function MapInterface() {
         </div>
       </div>
 
-      {/* ─── BOTTOM FLOATING TIMELINE DOCK (Single Source of Truth) ────── */}
+      {/* History playback stays off the Forecast tab so it cannot bring the history mask back. */}
+      {activeWorkflow !== WORKFLOWS.FORECAST && (
       <div
         className="absolute z-40 flex justify-center pointer-events-none"
         style={{
@@ -1321,6 +1337,7 @@ export default function MapInterface() {
           </div>
         </div>
       </div>
+      )}
     </div>
   );
 }

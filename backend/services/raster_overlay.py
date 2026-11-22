@@ -30,6 +30,10 @@ from scipy.ndimage import label
 # map opacity slider is the only transparency control.
 HISTORY_RGBA: tuple[int, int, int, int] = (217, 119, 6, 255)
 
+# Forecast overlay: muted amber baseline under vivid coral expansion.
+FORECAST_BASELINE_RGBA: tuple[int, int, int, int] = (217, 119, 6, 145)
+FORECAST_EXPANSION_RGBA: tuple[int, int, int, int] = (239, 68, 68, 255)
+
 _CACHE_DIR = Path(__file__).resolve().parent.parent / "cache" / "history"
 _KEY_LOCKS: dict[tuple, threading.Lock] = {}
 _KEY_LOCKS_GUARD = threading.Lock()
@@ -67,6 +71,112 @@ def mask_to_png_data_uri(
     image.save(buffer, format="PNG", optimize=True)
     encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
     return f"data:image/png;base64,{encoded}"
+
+
+def categorical_to_png_data_uri(
+    categories: np.ndarray,
+    palette: dict[int, tuple[int, int, int, int]],
+) -> str:
+    """Encode class ids as a transparent RGBA PNG data URI.
+
+    Class ids missing from ``palette`` stay fully transparent.
+    """
+    height, width = categories.shape
+    rgba = np.zeros((height, width, 4), dtype=np.uint8)
+    for value, color in palette.items():
+        rgba[categories == value] = color
+    image = Image.fromarray(rgba, mode="RGBA")
+    buffer = BytesIO()
+    image.save(buffer, format="PNG", optimize=True)
+    encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+    return f"data:image/png;base64,{encoded}"
+
+
+def _warp_categorical(
+    categories: np.ndarray,
+    src_transform,
+    src_crs,
+) -> tuple[np.ndarray, list[list[float]]]:
+    """Nearest-neighbor warp of a class raster to Web Mercator image corners."""
+    height, width = categories.shape
+    left, bottom, right, top = array_bounds(height, width, src_transform)
+    dst_transform, dst_width, dst_height = calculate_default_transform(
+        src_crs,
+        "EPSG:3857",
+        width,
+        height,
+        left,
+        bottom,
+        right,
+        top,
+    )
+    dst = np.zeros((dst_height, dst_width), dtype=np.uint8)
+    reproject(
+        source=categories,
+        destination=dst,
+        src_transform=src_transform,
+        src_crs=src_crs,
+        dst_transform=dst_transform,
+        dst_crs="EPSG:3857",
+        resampling=Resampling.nearest,
+    )
+    left, bottom, right, top = array_bounds(dst_height, dst_width, dst_transform)
+    west, south, east, north = transform_bounds(
+        "EPSG:3857",
+        "EPSG:4326",
+        left,
+        bottom,
+        right,
+        top,
+    )
+    coordinates = [
+        [float(west), float(north)],
+        [float(east), float(north)],
+        [float(east), float(south)],
+        [float(west), float(south)],
+    ]
+    return dst, coordinates
+
+
+def mask_to_mapbox_overlay(
+    binary_2030: np.ndarray,
+    src_transform,
+    src_crs,
+    baseline_2025: np.ndarray | None = None,
+) -> dict:
+    """Build a two-tone Mapbox overlay from in-memory forecast masks.
+
+    ``baseline_2025`` must already sit on the same grid as ``binary_2030``.
+    Category 1 is the retained 2025 urban core. Category 2 is 2030 expansion
+    that is not already baseline. No polygon filter is applied.
+    """
+    predicted = np.asarray(binary_2030).astype(bool)
+    if baseline_2025 is None:
+        baseline = np.zeros(predicted.shape, dtype=bool)
+    else:
+        baseline = np.asarray(baseline_2025).astype(bool)
+        if baseline.shape != predicted.shape:
+            raise ValueError(
+                f"baseline_2025 shape {baseline.shape} does not match "
+                f"forecast grid {predicted.shape}"
+            )
+
+    categories = np.zeros(predicted.shape, dtype=np.uint8)
+    categories[baseline] = 1
+    categories[predicted & ~baseline] = 2
+    warped, coordinates = _warp_categorical(categories, src_transform, src_crs)
+    return {
+        "coordinates": coordinates,
+        "image_url": categorical_to_png_data_uri(
+            warped,
+            {
+                1: FORECAST_BASELINE_RGBA,
+                2: FORECAST_EXPANSION_RGBA,
+            },
+        ),
+        "baseline_color": rgba_to_hex(FORECAST_BASELINE_RGBA),
+        "expansion_color": rgba_to_hex(FORECAST_EXPANSION_RGBA),
+    }
 
 
 def raster_to_mapbox_overlay(

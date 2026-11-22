@@ -19,8 +19,9 @@ const api = axios.create({
 /** CDX Point 8 – Run the fusion forecast */
 export const postForecast = (payload) => api.post("/forecast", payload);
 
-/** CDX Point 8 – Fetch GeoJSON forecast growth polygon layer */
-export const getForecastLayer = () => api.get("/forecast_layer");
+/** CDX Point 8 – full-grid 2030 raster overlay. Cold inference covers every 64px tile. */
+export const getForecastLayer = () =>
+  api.get("/forecast_layer", { timeout: 300_000 });
 
 /** Temporal History – full-resolution urban raster overlay for one year.
  *  Cold reprojection of a city-wide GeoTIFF can exceed the shared 30s client timeout. */
