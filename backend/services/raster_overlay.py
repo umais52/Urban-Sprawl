@@ -31,8 +31,8 @@ from scipy.ndimage import label
 HISTORY_RGBA: tuple[int, int, int, int] = (217, 119, 6, 255)
 
 # Forecast overlay: muted amber baseline under vivid coral expansion.
-FORECAST_BASELINE_RGBA: tuple[int, int, int, int] = (217, 119, 6, 145)
-FORECAST_EXPANSION_RGBA: tuple[int, int, int, int] = (239, 68, 68, 255)
+FORECAST_BASELINE_RGBA: tuple[int, int, int, int] = (217, 119, 6, 150)
+FORECAST_EXPANSION_RGBA: tuple[int, int, int, int] = (163, 32, 41, 240)
 
 _CACHE_DIR = Path(__file__).resolve().parent.parent / "cache" / "history"
 _KEY_LOCKS: dict[tuple, threading.Lock] = {}

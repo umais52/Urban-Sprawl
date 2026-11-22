@@ -432,8 +432,8 @@ export default function MapInterface() {
   const historySwatchColor = historyData?.color || HISTORY_SWATCH_FALLBACK;
   const showForecastLegend =
     activeWorkflow === WORKFLOWS.FORECAST && Boolean(forecastData?.image_url);
-  const forecastBaselineSwatch = forecastData?.baseline_color || "#D97706";
-  const forecastExpansionSwatch = forecastData?.expansion_color || "#EF4444";
+  const forecastBaselineSwatch = "#9A5B13";
+  const forecastExpansionSwatch = forecastData?.expansion_color || "#A32029";
 
   return (
     <div
@@ -938,7 +938,7 @@ export default function MapInterface() {
                   }}
                 >
                   <div className="flex items-center justify-between">
-                    <span className="text-[11px] font-semibold text-[#EF4444]">
+                    <span className="text-[11px] font-semibold text-[#C95B63]">
                       Forecast {forecastResult.target_year}
                     </span>
                     <span className="text-[10px] font-mono text-[#71717A]">
@@ -958,7 +958,7 @@ export default function MapInterface() {
                     </div>
                     <div className="flex justify-between text-[11px]">
                       <span className="text-[#71717A]">New Expansion</span>
-                      <span className="font-mono text-[#EF4444]">
+                      <span className="font-mono text-[#C95B63]">
                         {forecastResult.new_expansion_km2 == null
                           ? "—"
                           : `+${formatKm2(forecastResult.new_expansion_km2)} km²`}
@@ -1204,7 +1204,7 @@ export default function MapInterface() {
                   style={{
                     background: forecastBaselineSwatch,
                     border: `1px solid ${forecastBaselineSwatch}`,
-                    opacity: 0.57,
+                    opacity: 1,
                   }}
                 />
                 <span className="text-[11px] text-[#A1A1AA]">

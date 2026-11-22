@@ -1038,6 +1038,7 @@ def get_forecast_layer(threshold: float = _FORECAST_THRESHOLD) -> dict[str, Any]
 
     reference_path = _RASTER_2025_PATH if _RASTER_2025_PATH.is_file() else _RASTER_PATH
     cache_key = (
+        "v4",
         round(float(threshold), 4),
         str(reference_path),
         reference_path.stat().st_mtime_ns if reference_path.is_file() else 0,
