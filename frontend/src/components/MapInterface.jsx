@@ -20,8 +20,6 @@ import Map, {
   Source,
 } from "react-map-gl/mapbox";
 import "mapbox-gl/dist/mapbox-gl.css";
-import axios from "axios";
-
 import DrawControl from "./DrawControl";
 
 import {
@@ -40,7 +38,7 @@ import {
   TrendingUp,
 } from "lucide-react";
 
-import { getForecastLayer, getHealth, getHistory } from "../services/api";
+import { getForecastLayer, getHealth, getHistory, postSimulateRoad } from "../services/api";
 
 // ---------------------------------------------------------------------------
 // Mapbox token from .env (VITE_ prefix required by Vite)
@@ -119,6 +117,25 @@ function formatCount(value) {
   return Number(value).toLocaleString("en-US");
 }
 
+function polylineLengthKm(coords) {
+  if (!coords || coords.length < 2) return 0;
+  const earthKm = 6371;
+  let total = 0;
+  for (let index = 1; index < coords.length; index += 1) {
+    const [lng1, lat1] = coords[index - 1];
+    const [lng2, lat2] = coords[index];
+    const dLat = ((lat2 - lat1) * Math.PI) / 180;
+    const dLng = ((lng2 - lng1) * Math.PI) / 180;
+    const a =
+      Math.sin(dLat / 2) ** 2 +
+      Math.cos((lat1 * Math.PI) / 180) *
+        Math.cos((lat2 * Math.PI) / 180) *
+        Math.sin(dLng / 2) ** 2;
+    total += 2 * earthKm * Math.asin(Math.min(1, Math.sqrt(a)));
+  }
+  return total;
+}
+
 // ---------------------------------------------------------------------------
 // Workflow tabs
 // ---------------------------------------------------------------------------
@@ -164,6 +181,7 @@ export default function MapInterface() {
   const [simulating, setSimulating] = useState(false);
   const [simulationResult, setSimulationResult] = useState(null);
   const [simulationData, setSimulationData] = useState(null);
+  const [simulateBaseline, setSimulateBaseline] = useState(null);
 
   // ── Health ping on mount ────────────────────────────────────────────────
   useEffect(() => {
@@ -232,10 +250,24 @@ export default function MapInterface() {
     return () => clearInterval(interval);
   }, [isPlaying]);
 
-  // Stop history playback when the forecast overlay is the active map.
+  // History playback stays on the History tab.
   useEffect(() => {
-    if (activeWorkflow === WORKFLOWS.FORECAST) setIsPlaying(false);
+    if (activeWorkflow !== WORKFLOWS.HISTORY) setIsPlaying(false);
   }, [activeWorkflow]);
+
+  // Soft 2025 context for drawing a road. Uses the cached History overlay.
+  useEffect(() => {
+    if (activeWorkflow !== WORKFLOWS.SIMULATE) return undefined;
+    let active = true;
+    loadHistoryYear(2025)
+      .then((data) => {
+        if (active) setSimulateBaseline(data);
+      })
+      .catch((err) => console.error("[Simulate baseline]", err));
+    return () => {
+      active = false;
+    };
+  }, [activeWorkflow, loadHistoryYear]);
 
   // ── Forecast handler ─────────────────────────────────────────────────────
   const fetchForecast = useCallback(async () => {
@@ -308,52 +340,9 @@ export default function MapInterface() {
 
     setSimulating(true);
     try {
-      const response = await axios.post(
-        "http://127.0.0.1:8000/api/v1/simulate_road",
-        {
-          geojson: drawnRoad,
-          baseline_p_urban: 0.45,
-          grid_h: 64,
-          grid_w: 64,
-        }
-      );
-
-      const data = response.data;
+      const { data } = await postSimulateRoad({ geojson: drawnRoad });
       setSimulationResult(data);
-
-      let geojson = data;
-      if (data && (data.type === "FeatureCollection" || data.type === "Feature")) {
-        geojson = data;
-      } else if (data?.geojson && (data.geojson.type === "FeatureCollection" || data.geojson.type === "Feature")) {
-        geojson = data.geojson;
-      } else if (drawnRoad?.geometry?.coordinates) {
-        const polyRing = bufferLineCoordinates(drawnRoad.geometry.coordinates, 0.012);
-        geojson = {
-          type: "FeatureCollection",
-          metadata: { ...data },
-          features: [
-            {
-              type: "Feature",
-              id: "simulated_road_delta_polygon",
-              properties: {
-                name: "Simulated Urban Growth Delta",
-                corridor: "Proposed Road Infrastructure Corridor",
-                delta_p_urban: data.delta_p_urban,
-                updated_p_urban: data.updated_p_urban,
-                affected_area_cells: data.affected_area_cells,
-                road_pixel_count: data.road_pixel_count,
-                influence_radius_cells: data.influence_radius_cells,
-              },
-              geometry: {
-                type: "Polygon",
-                coordinates: [polyRing],
-              },
-            },
-          ],
-        };
-      }
-
-      setSimulationData(geojson);
+      setSimulationData(data);
     } catch (err) {
       console.error("[Simulate Road]", err);
       setSimulationResult({ error: err.message });
@@ -388,26 +377,6 @@ export default function MapInterface() {
   const getLayerColor = (layerId) => {
     if (layerId === "simulation-polygons-fill") return "#5B98D4";
     return "#D97706";
-  };
-
-  // ── Simulation stays on GeoJSON fill/line layers ────────────────────────
-  const simulationFillLayer = {
-    id: "simulation-polygons-fill",
-    type: "fill",
-    paint: {
-      "fill-color": "#5B98D4",
-      "fill-opacity": 0.5,
-    },
-  };
-
-  const simulationOutlineLayer = {
-    id: "simulation-polygons-outline",
-    type: "line",
-    paint: {
-      "line-color": "#5B98D4",
-      "line-width": 1.5,
-      "line-opacity": 0.85,
-    },
   };
 
   const historyStatsReady = historyData?.year === currentYear;
@@ -447,7 +416,7 @@ export default function MapInterface() {
         onMove={(evt) => setViewState(evt.viewState)}
         onClick={handleMapClick}
         onLoad={handleMapLoad}
-        interactiveLayerIds={["simulation-polygons-fill"]}
+        interactiveLayerIds={[]}
         mapboxAccessToken={MAPBOX_TOKEN}
         mapStyle={ACTIVE_MAP_STYLE}
         style={{ width: "100%", height: "100%" }}
@@ -509,11 +478,45 @@ export default function MapInterface() {
           </Source>
         )}
 
-        {/* ─── What-If Road Simulation Delta Layer ─── */}
-        {simulationData && (
-          <Source id="simulation-layer-source" type="geojson" data={simulationData}>
-            <Layer {...simulationFillLayer} />
-            <Layer {...simulationOutlineLayer} />
+        {/* ─── 2025 context while drawing a road (Simulate tab only) ─── */}
+        {activeWorkflow === WORKFLOWS.SIMULATE && simulateBaseline?.image_url && (
+          <Source
+            id="simulate-baseline-source"
+            type="image"
+            url={simulateBaseline.image_url}
+            coordinates={simulateBaseline.coordinates}
+          >
+            <Layer
+              id="simulate-baseline-layer"
+              type="raster"
+              beforeId={labelLayerId || undefined}
+              paint={{
+                "raster-opacity": 0.35,
+                "raster-resampling": "nearest",
+                "raster-fade-duration": 0,
+              }}
+            />
+          </Source>
+        )}
+
+        {/* ─── Road uplift raster (Simulate tab only) ─── */}
+        {activeWorkflow === WORKFLOWS.SIMULATE && simulationData?.image_url && (
+          <Source
+            id="simulate-uplift-source"
+            type="image"
+            url={simulationData.image_url}
+            coordinates={simulationData.coordinates}
+          >
+            <Layer
+              id="simulate-uplift-layer"
+              type="raster"
+              beforeId={labelLayerId || undefined}
+              paint={{
+                "raster-opacity": 0.85,
+                "raster-resampling": "nearest",
+                "raster-fade-duration": 0,
+              }}
+            />
           </Source>
         )}
 
@@ -1060,10 +1063,10 @@ export default function MapInterface() {
                 </div>
 
                 {drawnRoad ? (
-                  <div className="flex items-center gap-2 text-[12px] text-[#5B98D4] font-medium">
+                  <div className="flex items-center gap-2 text-[12px] text-[#38B2AC] font-medium">
                     <Route size={14} />
                     <span>
-                      Corridor drawn ({drawnRoad.geometry?.coordinates?.length || 2} vertices)
+                      Active Corridor — {polylineLengthKm(drawnRoad.geometry?.coordinates).toFixed(1)} km
                     </span>
                   </div>
                 ) : (
@@ -1078,11 +1081,18 @@ export default function MapInterface() {
 
               <button
                 onClick={handleSimulateRoad}
-                disabled={simulating || backendStatus !== "online" || !drawnRoad}
+                disabled={
+                  simulating ||
+                  backendStatus !== "online" ||
+                  polylineLengthKm(drawnRoad?.geometry?.coordinates) <= 0
+                }
                 className="w-full rounded-md py-2.5 text-[12px] font-semibold transition-all
                            disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-2"
                 style={{
-                  background: drawnRoad ? "#5B98D4" : "rgba(91, 152, 212, 0.25)",
+                  background:
+                    polylineLengthKm(drawnRoad?.geometry?.coordinates) > 0
+                      ? "#26767A"
+                      : "rgba(38, 118, 122, 0.25)",
                   color: "#F4F4F6",
                 }}
               >
@@ -1108,34 +1118,48 @@ export default function MapInterface() {
                     border: "1px solid #26262B",
                   }}
                 >
-                  <span className="text-[11px] font-semibold text-[#5B98D4] block">
+                  <span className="text-[11px] font-semibold text-[#5EEAD4] block">
                     Scenario Impact Analysis
                   </span>
                   <div className="space-y-1.5 pt-1">
                     <div className="flex justify-between text-[11px]">
-                      <span className="text-[#71717A]">Updated P(Urban)</span>
-                      <span className="font-mono text-[#F4F4F6] font-semibold">
-                        {((simulationResult.updated_p_urban || 0) * 100).toFixed(1)}%
+                      <span className="text-[#71717A]">Mean Uplift</span>
+                      <span className="font-mono text-[#5EEAD4] font-semibold">
+                        +{Number(simulationResult.mean_uplift_pct || 0).toFixed(1)}%
                       </span>
                     </div>
                     <div className="flex justify-between text-[11px]">
-                      <span className="text-[#71717A]">Delta Uplift</span>
-                      <span className="font-mono text-[#5B98D4] font-semibold">
-                        +{((simulationResult.delta_p_urban || 0) * 100).toFixed(2)}%
+                      <span className="text-[#71717A]">Max Uplift</span>
+                      <span className="font-mono text-[#5EEAD4] font-semibold">
+                        +{Number(simulationResult.max_uplift_pct || 0).toFixed(1)}%
                       </span>
                     </div>
                     <div className="flex justify-between text-[11px]">
-                      <span className="text-[#71717A]">Affected Cells</span>
+                      <span className="text-[#71717A]">Affected Corridor Area</span>
                       <span className="font-mono text-[#F4F4F6]">
-                        {simulationResult.affected_area_cells}
+                        {Number(simulationResult.affected_area_km2 || 0).toLocaleString("en-US", {
+                          minimumFractionDigits: 2,
+                          maximumFractionDigits: 2,
+                        })} km²
                       </span>
                     </div>
                     <div className="flex justify-between text-[11px]">
-                      <span className="text-[#71717A]">Influence Radius</span>
+                      <span className="text-[#71717A]">Induced New Urban</span>
                       <span className="font-mono text-[#F4F4F6]">
-                        {simulationResult.influence_radius_cells} cells
+                        +{Number(simulationResult.induced_urban_km2 || 0).toFixed(2)} km²
                       </span>
                     </div>
+                    <div className="flex justify-between text-[11px]">
+                      <span className="text-[#71717A]">Patches</span>
+                      <span className="font-mono text-[#F4F4F6]">
+                        {formatCount(simulationResult.induced_patches || 0)}
+                      </span>
+                    </div>
+                    {simulationResult.notice && (
+                      <p className="text-[10px] text-[#A1A1AA] leading-snug pt-1">
+                        {simulationResult.notice}
+                      </p>
+                    )}
                   </div>
                 </div>
               )}
@@ -1227,26 +1251,55 @@ export default function MapInterface() {
             </>
           )}
 
-          {/* Scenario delta swatch */}
-          {simulationData && activeWorkflow === WORKFLOWS.SIMULATE && (
+          {activeWorkflow === WORKFLOWS.SIMULATE && simulateBaseline?.image_url && (
             <div className="flex items-center gap-2">
               <span
                 className="w-3 h-3 shrink-0 rounded-[2px]"
                 style={{
-                  background: "#5B98D4",
-                  border: "1px solid #60A5FA",
-                  opacity: 0.85,
+                  background: "#9A5B13",
+                  border: "1px solid #9A5B13",
+                  opacity: 1,
                 }}
               />
               <span className="text-[11px] text-[#A1A1AA]">
-                Simulated Growth Delta
+                Existing Urban Baseline (2025)
               </span>
             </div>
+          )}
+          {activeWorkflow === WORKFLOWS.SIMULATE && simulationData?.image_url && (
+            <>
+              <div className="flex items-center gap-2">
+                <span
+                  className="w-3 h-3 shrink-0 rounded-[2px]"
+                  style={{
+                    background: "#38B2AC",
+                    border: "1px solid #38B2AC",
+                    opacity: 0.85,
+                  }}
+                />
+                <span className="text-[11px] text-[#A1A1AA]">
+                  Probability Uplift Corridor
+                </span>
+              </div>
+              <div className="flex items-center gap-2">
+                <span
+                  className="w-3 h-3 shrink-0 rounded-[2px]"
+                  style={{
+                    background: "#5EEAD4",
+                    border: "1px solid #5EEAD4",
+                    opacity: 0.85,
+                  }}
+                />
+                <span className="text-[11px] text-[#A1A1AA]">
+                  High Uplift / Induced Growth
+                </span>
+              </div>
+            </>
           )}
 
           {!showHistoryLegend &&
             !showForecastLegend &&
-            !(simulationData && activeWorkflow === WORKFLOWS.SIMULATE) && (
+            !(activeWorkflow === WORKFLOWS.SIMULATE && (simulateBaseline?.image_url || simulationData?.image_url)) && (
               <span className="text-[11px] text-[#71717A]">
                 No layers visible
               </span>
@@ -1255,7 +1308,7 @@ export default function MapInterface() {
       </div>
 
       {/* History playback stays off the Forecast tab so it cannot bring the history mask back. */}
-      {activeWorkflow !== WORKFLOWS.FORECAST && (
+      {activeWorkflow === WORKFLOWS.HISTORY && (
       <div
         className="absolute z-40 flex justify-center pointer-events-none"
         style={{

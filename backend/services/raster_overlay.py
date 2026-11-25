@@ -179,6 +179,43 @@ def mask_to_mapbox_overlay(
     }
 
 
+# Simulate uplift tiers. Class 0 stays transparent.
+SIMULATE_LOW_RGBA: tuple[int, int, int, int] = (38, 118, 122, 145)
+SIMULATE_MID_RGBA: tuple[int, int, int, int] = (56, 178, 172, 205)
+SIMULATE_HIGH_RGBA: tuple[int, int, int, int] = (94, 234, 212, 240)
+
+
+def uplift_to_mapbox_overlay(
+    categories: np.ndarray,
+    src_transform,
+    src_crs,
+) -> dict:
+    """Warp a 0/1/2/3 uplift class raster to a Mapbox image overlay.
+
+    1 is low, 2 is moderate, 3 is high or induced growth. Nearest resampling
+    keeps the 30 m class edges.
+    """
+    warped, coordinates = _warp_categorical(
+        np.asarray(categories, dtype=np.uint8),
+        src_transform,
+        src_crs,
+    )
+    return {
+        "coordinates": coordinates,
+        "image_url": categorical_to_png_data_uri(
+            warped,
+            {
+                1: SIMULATE_LOW_RGBA,
+                2: SIMULATE_MID_RGBA,
+                3: SIMULATE_HIGH_RGBA,
+            },
+        ),
+        "low_color": rgba_to_hex(SIMULATE_LOW_RGBA),
+        "mid_color": rgba_to_hex(SIMULATE_MID_RGBA),
+        "high_color": rgba_to_hex(SIMULATE_HIGH_RGBA),
+    }
+
+
 def raster_to_mapbox_overlay(
     tif_path: str,
     rgba_color: tuple[int, int, int, int],

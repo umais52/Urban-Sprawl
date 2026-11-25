@@ -37,7 +37,8 @@ from typing import Any
 
 import numpy as np
 import rasterio
-from rasterio.warp import Resampling, reproject
+from rasterio.features import rasterize
+from rasterio.warp import Resampling, reproject, transform_geom
 import time
 from rasterio.windows import Window
 import xgboost as xgb
@@ -67,9 +68,17 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator
 
 try:
-    from services.raster_overlay import load_history_overlay, mask_to_mapbox_overlay
+    from services.raster_overlay import (
+        load_history_overlay,
+        mask_to_mapbox_overlay,
+        uplift_to_mapbox_overlay,
+    )
 except ImportError:  # `uvicorn backend.main:app` from the repo root
-    from backend.services.raster_overlay import load_history_overlay, mask_to_mapbox_overlay
+    from backend.services.raster_overlay import (
+        load_history_overlay,
+        mask_to_mapbox_overlay,
+        uplift_to_mapbox_overlay,
+    )
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -742,6 +751,7 @@ _FORECAST_BATCH = 32
 _FORECAST_THRESHOLD = 0.5
 _forecast_overlay_cache: dict[tuple, dict[str, Any]] = {}
 _forecast_overlay_lock = threading.Lock()
+_forecast_grids: dict[str, Any] = {}
 
 
 def _align_binary_to_grid(
@@ -894,6 +904,7 @@ def _build_forecast_overlay(threshold: float) -> dict[str, Any]:
 
     height, width = dst_shape
     prob = np.zeros((height, width), dtype=np.float32)
+    p_dl_map = np.zeros((height, width), dtype=np.float32)
     feature_names = list(registry.xgboost_model.feature_names or [])
     origins = [
         (row, col)
@@ -944,6 +955,7 @@ def _build_forecast_overlay(threshold: float) -> dict[str, Any]:
             offset += count
             fused = logit_fusion(p_dl, p_xgb, ca_full[row:row + row_h, col:col + col_w])
             prob[row:row + row_h, col:col + col_w] = np.asarray(fused, dtype=np.float32)
+            p_dl_map[row:row + row_h, col:col + col_w] = p_dl
             cnn_min = min(cnn_min, float(p_dl.min()))
             cnn_max = max(cnn_max, float(p_dl.max()))
             cnn_sum += float(p_dl.sum())
@@ -1003,6 +1015,22 @@ def _build_forecast_overlay(threshold: float) -> dict[str, Any]:
         f"inference_ms: {inference_ms}",
     ]
     logger.info("[Forecast] %s", " | ".join(logs[:4]))
+    # Probability grids for the Simulate counterfactual. The forecast JSON is unchanged.
+    _forecast_grids.clear()
+    _forecast_grids.update({
+        "ready": True,
+        "prob": prob,
+        "p_dl": p_dl_map,
+        "p_ca": ca_full,
+        "baseline": baseline,
+        "urban_2025": sequence[3],
+        "urban_2020": sequence[2],
+        "dist_urban": dist_urban,
+        "dist_1995": dist_1995,
+        "transform": dst_transform,
+        "crs": dst_crs,
+        "threshold": float(threshold),
+    })
     return {
         "year": 2030,
         "predicted_area_km2": predicted_area,
@@ -1465,118 +1493,411 @@ def _road_p_urban_delta(
 # ---------------------------------------------------------------------------
 # What-If Sandbox -- POST /api/v1/simulate_road
 # ---------------------------------------------------------------------------
-@app.post("/api/v1/simulate_road", response_model=SimulateRoadResponse)
-def simulate_road(payload: SimulateRoadRequest) -> SimulateRoadResponse:
+def _line_geometries_from_request(payload: SimulateRoadRequest) -> list[dict[str, Any]]:
+    """Collect EPSG:4326 LineStrings from the draw payload."""
+    lines: list[dict[str, Any]] = []
+
+    def add_geometry(geom: dict[str, Any] | None) -> None:
+        if not geom:
+            return
+        kind = geom.get("type")
+        if kind == "LineString" and len(geom.get("coordinates") or []) >= 2:
+            lines.append(geom)
+        elif kind == "MultiLineString":
+            for part in geom.get("coordinates") or []:
+                if len(part) >= 2:
+                    lines.append({"type": "LineString", "coordinates": part})
+
+    if payload.geojson:
+        geojson = payload.geojson
+        kind = geojson.get("type")
+        if kind == "FeatureCollection":
+            for feature in geojson.get("features") or []:
+                add_geometry(feature.get("geometry"))
+        elif kind == "Feature":
+            add_geometry(geojson.get("geometry"))
+        else:
+            add_geometry(geojson)
+    elif payload.coordinates and len(payload.coordinates) >= 2:
+        coords: list[list[float]] = []
+        for point in payload.coordinates:
+            if isinstance(point, (list, tuple)) and len(point) >= 2:
+                coords.append([float(point[0]), float(point[1])])
+            elif isinstance(point, dict) and "lng" in point and "lat" in point:
+                coords.append([float(point["lng"]), float(point["lat"])])
+        if len(coords) >= 2:
+            lines.append({"type": "LineString", "coordinates": coords})
+    return lines
+
+
+def _linestring_length_m(coordinates: list) -> float:
+    length = 0.0
+    for index in range(1, len(coordinates)):
+        x1, y1 = coordinates[index - 1][:2]
+        x2, y2 = coordinates[index][:2]
+        length += math.hypot(float(x2) - float(x1), float(y2) - float(y1))
+    return length
+
+
+def _major_road_distance_m(xs: np.ndarray, ys: np.ndarray) -> np.ndarray:
+    """Perpendicular distance in meters to the synthetic M-9 axis used by XGBoost."""
+    m9_x0, m9_y0, m9_dx, m9_dy = 315000.0, 2760000.0, 35000.0, 20000.0
+    m9_len = math.hypot(m9_dx, m9_dy)
+    return np.abs((xs - m9_x0) * m9_dy - (ys - m9_y0) * m9_dx) / m9_len
+
+
+def _xgb_rows_for_pixels(
+    rows: np.ndarray,
+    cols: np.ndarray,
+    dist_major: np.ndarray,
+    dist_minor: np.ndarray,
+    ntl_dist_major: np.ndarray,
+    grids: dict[str, Any],
+    feature_names: list[str],
+) -> np.ndarray:
+    """16 forecast features. Only the supplied road-distance columns vary."""
+    transform = grids["transform"]
+    xs = transform.c + cols * transform.a + rows * transform.b
+    ys = transform.f + cols * transform.d + rows * transform.e
+    dist_urban = grids["dist_urban"][rows, cols]
+    dist_1995 = grids["dist_1995"][rows, cols]
+    patch_2025 = grids["urban_2025"][rows, cols]
+    patch_2020 = grids["urban_2020"][rows, cols]
+    dist_city = np.sqrt((xs - 300000.0) ** 2 + (ys - 2750000.0) ** 2).astype(np.float32)
+    dist_coast = np.maximum(0.0, ys - 2740000.0).astype(np.float32)
+    dist_water = np.clip(np.abs(ys - 2770000.0) * 0.5 + 2000.0, 500.0, 15000.0)
+    dem = np.clip((ys - 2740000.0) / 400.0 + 10.0, 5.0, 150.0).astype(np.float32)
+    ntl = np.clip(
+        60.0 * np.exp(-dist_urban / 1000.0) + 10.0 * np.exp(-ntl_dist_major / 2000.0),
+        0.0,
+        63.0,
+    )
+    ndbi = np.clip(0.35 * patch_2020 + 0.15 * (1.0 - np.exp(-dist_urban / 500.0)) - 0.1, -0.5, 0.6)
+    ndvi = np.clip(0.12 - 0.08 * patch_2020, -0.2, 0.5)
+    mndwi = np.clip(-0.35 + 0.05 * (dem / 100.0), -0.8, 0.2)
+    population = np.clip(1200.0 * np.exp(-dist_urban / 800.0), 5.0, 2500.0)
+    count = rows.size
+    feature_dict = {
+        "Dist_Coastline": dist_coast.astype(np.float32),
+        "Dist_Major_Roads": dist_major.astype(np.float32),
+        "Dist_Minor_Roads": dist_minor.astype(np.float32),
+        "Dist_Waterways": dist_water.astype(np.float32),
+        "Dist_CityCenter": dist_city,
+        "Slope": np.full(count, 2.5, dtype=np.float32),
+        "Aspect": np.full(count, 180.0, dtype=np.float32),
+        "DEM": dem,
+        "MNDWI": mndwi.astype(np.float32),
+        "NDBI": ndbi.astype(np.float32),
+        "NDVI": ndvi.astype(np.float32),
+        "NTL": ntl.astype(np.float32),
+        "Population": population.astype(np.float32),
+        "Urban_Sprawl_Final_2025_Fusion": patch_2025.astype(np.float32),
+        "Dist_Urban_Patch": dist_1995.astype(np.float32),
+        "Previous_Urban": patch_2020.astype(np.float32),
+    }
+    return np.column_stack(
+        [feature_dict.get(name, np.zeros(count, dtype=np.float32)) for name in feature_names]
+    ).astype(np.float32)
+
+
+def _simulate_water_mask(
+    height: int,
+    width: int,
+    transform,
+    crs,
+    ys: np.ndarray,
+    baseline: np.ndarray,
+) -> tuple[np.ndarray, str]:
+    """Water and offshore pixels. Prefer the MNDWI GeoTIFF when it is on disk."""
+    candidates = [
+        _DATA_DIR / "32642_Final_Karachi_MNDWI_30m.tif",
+        _PROJECT_ROOT / "32642_Final_Karachi_MNDWI_30m.tif",
+    ]
+    candidates.extend(_DATA_DIR.glob("*MNDWI*.tif"))
+    path = next((item for item in candidates if item.is_file()), None)
+    offshore = ys < 2_740_000.0
+    if path is None:
+        # South of the built coastline in each column covers the harbour and
+        # Arabian Sea when the MNDWI raster is not available. Land north of
+        # that edge, including the northern fringe, stays buildable.
+        row_index = np.arange(height, dtype=np.int32)[:, None]
+        south_row = np.where(baseline, row_index, -1).max(axis=0)
+        south_of_city = (south_row[None, :] >= 0) & (row_index > south_row[None, :])
+        return offshore | south_of_city, (
+            "coastline y<2740000 m and south of the built shore "
+            "(32642_Final_Karachi_MNDWI_30m.tif not on disk)"
+        )
+
+    with rasterio.open(path) as src:
+        band = src.read(1).astype(np.float32)
+        nodata = src.nodata
+        if band.shape != (height, width) or src.transform != transform or str(src.crs) != str(crs):
+            aligned = np.full((height, width), np.nan, dtype=np.float32)
+            reproject(
+                source=band,
+                destination=aligned,
+                src_transform=src.transform,
+                src_crs=src.crs,
+                dst_transform=transform,
+                dst_crs=crs,
+                resampling=Resampling.nearest,
+                src_nodata=nodata,
+                dst_nodata=np.nan,
+            )
+            band = aligned
+    invalid = ~np.isfinite(band)
+    if nodata is not None and np.isfinite(nodata):
+        invalid = invalid | (band == np.float32(nodata))
+    water = (band > 0.0) | invalid | offshore
+    return water, f"{path.name} mndwi>0 plus coastline y<2740000 m"
+
+
+def _diffuse_corridor_uplift(
+    model_uplift: np.ndarray,
+    baseline: np.ndarray,
+    road_dist_m: np.ndarray,
+    corridor_zone: np.ndarray,
+) -> np.ndarray:
+    """Two 5x5 CA passes so growth leaves the asphalt pixel and follows the corridor."""
+    decay = np.exp(-road_dist_m / 600.0).astype(np.float32)
+    # Slope is the constant 2.5 used by this model; the factor is 1 and stays explicit.
+    slope_factor = float(np.exp(-max(2.5 - 2.5, 0.0) / 10.0))
+    field = np.maximum(
+        model_uplift,
+        ((road_dist_m <= 45.0) & corridor_zone).astype(np.float32) * np.float32(0.40),
+    )
+    urban = baseline.astype(np.float32)
+    for _ in range(2):
+        seed = np.maximum(field, urban)
+        density = uniform_filter(seed, size=5).astype(np.float32)
+        grown = np.clip(density * decay * slope_factor, 0.0, 1.0)
+        field = np.where(corridor_zone, np.maximum(field, grown), 0.0).astype(np.float32)
+    return field
+
+
+def _ensure_forecast_grids() -> dict[str, Any]:
+    """Return the cached 2030 probability grids, building them once if needed."""
+    if _forecast_grids.get("ready"):
+        return _forecast_grids
+    get_forecast_layer()
+    if not _forecast_grids.get("ready"):
+        raise HTTPException(
+            status_code=503,
+            detail="Baseline 2030 probability grid is not available.",
+        )
+    return _forecast_grids
+
+
+@app.post("/api/v1/simulate_road")
+def simulate_road(payload: SimulateRoadRequest) -> dict[str, Any]:
     """
-    **What-If Interactive Sandbox: Road Infrastructure Simulation**
+    **Road-corridor uplift overlay**
 
-    Accepts a user-drawn road as a GeoJSON LineString (fractional coordinates)
-    and simulates the effect on urban expansion probability by:
-
-    1. Rasterising the road onto a `grid_h x grid_w` boolean mask.
-    2. Computing `Dist_Roads` -- the Euclidean distance from every cell to the
-       nearest road pixel -- using `scipy.ndimage.distance_transform_edt`.
-    3. Applying a Gaussian proximity bonus to estimate `updated_p_urban`.
-
-    Returns the updated P_urban, the number of affected cells, and Dist_Roads
-    field statistics for downstream rendering.
+    Rasterises a drawn road in EPSG:32642, shortens Dist_Major_Roads where the
+    new corridor is closer than the existing major-road distance, and re-fuses
+    XGBoost on that zone. The 2025 urban core is never marked as new growth.
     """
-    H, W = payload.grid_h, payload.grid_w
-
-    raw_coords: list[Any] = []
-    if payload.coordinates:
-        raw_coords = payload.coordinates
-    elif payload.geojson:
-        g = payload.geojson
-        if g.get("type") == "FeatureCollection" and g.get("features"):
-            for feat in g["features"]:
-                geom = feat.get("geometry", {})
-                if geom.get("type") == "LineString":
-                    raw_coords.extend(geom.get("coordinates", []))
-        elif g.get("type") == "Feature":
-            geom = g.get("geometry", {})
-            if geom.get("type") == "LineString":
-                raw_coords = geom.get("coordinates", [])
-        elif g.get("type") == "LineString":
-            raw_coords = g.get("coordinates", [])
-
-    if len(raw_coords) < 2:
+    lines = _line_geometries_from_request(payload)
+    if not lines:
         raise HTTPException(
             status_code=422,
             detail="At least 2 coordinate vertices are required to simulate a road.",
         )
 
-    norm_coords = _normalize_road_coords(raw_coords)
-    if len(norm_coords) < 2:
+    grids = _ensure_forecast_grids()
+    transform = grids["transform"]
+    crs = grids["crs"]
+    baseline = grids["baseline"]
+    height, width = baseline.shape
+    projected: list[dict[str, Any]] = []
+    length_m = 0.0
+    for line in lines:
+        projected_line = transform_geom("EPSG:4326", crs, line)
+        projected.append(projected_line)
+        length_m += _linestring_length_m(projected_line.get("coordinates") or [])
+
+    road_mask = rasterize(
+        [(geom, 1) for geom in projected],
+        out_shape=(height, width),
+        transform=transform,
+        fill=0,
+        all_touched=True,
+        dtype=np.uint8,
+    )
+    if int(road_mask.sum()) == 0:
         raise HTTPException(
             status_code=422,
-            detail="Could not extract at least 2 valid coordinates from the road.",
+            detail="The drawn road does not intersect the Karachi model grid.",
         )
 
-    # Step 1: Rasterise the user-drawn road onto the grid
-    road_mask = _rasterise_road(norm_coords, H, W)
-    road_pixel_count = int(road_mask.sum())
+    # Dist_Major_Roads is meters (perpendicular distance to the synthetic M-9 axis).
+    # There is no Final_Karachi_Dist_Major_Roads.tif on disk.
+    pixel_y_m = abs(float(transform.e))
+    pixel_x_m = abs(float(transform.a))
+    rows_all, cols_all = np.indices((height, width))
+    xs = transform.c + cols_all * transform.a + rows_all * transform.b
+    ys = transform.f + cols_all * transform.d + rows_all * transform.e
+    orig_dist = _major_road_distance_m(xs, ys).astype(np.float32)
+    water_mask, water_note = _simulate_water_mask(height, width, transform, crs, ys, baseline)
+    buildable = ~baseline & ~water_mask
+    # Distance is measured from the road only where it crosses buildable land,
+    # so a line drawn on the harbour does not spill uplift onto the shore.
+    road_on_land = (road_mask == 1) & buildable
+    if not road_on_land.any():
+        road_dist_m = np.full((height, width), np.float32(1.0e9), dtype=np.float32)
+        corridor_zone = np.zeros((height, width), dtype=bool)
+    else:
+        road_dist_m = distance_transform_edt(
+            ~road_on_land,
+            sampling=(pixel_y_m, pixel_x_m),
+        ).astype(np.float32)
+        corridor_zone = (road_dist_m <= 2500.0) & buildable
+    zone_rows, zone_cols = np.nonzero(corridor_zone)
 
-    if road_pixel_count == 0:
-        raise HTTPException(
-            status_code=422,
-            detail="No road pixels could be rasterised onto the grid.",
+    dist_urban = grids["dist_urban"]
+    orig_minor = np.clip(orig_dist * 0.4 + dist_urban * 0.3, 50.0, 8000.0).astype(np.float32)
+    new_major = np.minimum(orig_dist, road_dist_m).astype(np.float32)
+    new_minor = np.minimum(orig_minor, road_dist_m).astype(np.float32)
+
+    feature_names = list(registry.xgboost_model.feature_names or [])
+    xgb_file = _XGB_MODEL_PATH.name
+    prob_base = np.array(grids["prob"], copy=True)
+    prob_sim = np.array(prob_base, copy=True)
+    chunk = 200_000
+    for start in range(0, zone_rows.size, chunk):
+        stop = min(start + chunk, zone_rows.size)
+        rows = zone_rows[start:stop]
+        cols = zone_cols[start:stop]
+        base_features = _xgb_rows_for_pixels(
+            rows, cols, orig_dist[rows, cols], orig_minor[rows, cols], orig_dist[rows, cols],
+            grids, feature_names,
         )
+        sim_features = _xgb_rows_for_pixels(
+            rows, cols, new_major[rows, cols], new_minor[rows, cols], orig_dist[rows, cols],
+            grids, feature_names,
+        )
+        names = feature_names
+        p_base = registry.xgboost_model.predict(xgb.DMatrix(base_features, feature_names=names))
+        p_sim = registry.xgboost_model.predict(xgb.DMatrix(sim_features, feature_names=names))
+        p_dl = grids["p_dl"][rows, cols]
+        p_ca = grids["p_ca"][rows, cols]
+        fused_base = logit_fusion(p_dl, p_base, p_ca)
+        fused_sim = logit_fusion(p_dl, p_sim, p_ca)
+        prob_base[rows, cols] = np.asarray(fused_base, dtype=np.float32)
+        prob_sim[rows, cols] = np.asarray(fused_sim, dtype=np.float32)
 
-    # Step 2: Compute Dist_Roads via SciPy distance_transform_edt
-    # distance_transform_edt treats True as background; we invert the mask
-    # so road pixels (True) have distance 0, all others get their EDT value.
-    non_road = ~road_mask
-    dist_field: np.ndarray = distance_transform_edt(non_road)  # shape (H, W), float64
+    model_uplift = np.where(
+        corridor_zone,
+        np.clip(prob_sim - prob_base, 0.0, 1.0),
+        0.0,
+    ).astype(np.float32)
+    visible = model_uplift >= 0.015
+    within_60 = int((visible & (road_dist_m <= 60.0)).sum())
+    visible_count = int(visible.sum())
+    share_60 = (within_60 / visible_count) if visible_count else 1.0
+    pixel_km2 = abs(transform.a * transform.e) / 1e6
+    model_area = float((model_uplift >= 0.02).sum()) * pixel_km2
+    diffused = False
+    prob_uplift = model_uplift
+    if share_60 >= 0.75 or model_area < 2.0:
+        prob_uplift = _diffuse_corridor_uplift(
+            model_uplift, baseline, road_dist_m, corridor_zone
+        )
+        diffused = True
+    prob_uplift = np.where(buildable, prob_uplift, 0.0).astype(np.float32)
 
-    # Step 3: Estimate P_urban uplift from road proximity
-    updated_p_urban, affected_cells = _road_p_urban_delta(
-        dist_field,
-        influence_sigma=_ROAD_INFLUENCE_SIGMA,
-        baseline_p_urban=payload.baseline_p_urban,
+    threshold = float(grids["threshold"])
+    induced = (prob_base + prob_uplift >= threshold) & (prob_base < threshold) & buildable
+    categories = np.zeros((height, width), dtype=np.uint8)
+    categories[(prob_uplift >= 0.015) & (prob_uplift < 0.08)] = 1
+    categories[(prob_uplift >= 0.08) & (prob_uplift < 0.20)] = 2
+    categories[(prob_uplift >= 0.20) | induced] = 3
+    categories[~buildable] = 0
+
+    meaningful = prob_uplift >= 0.02
+    affected_area = round(float(meaningful.sum()) * pixel_km2, 2)
+    induced_area = round(float(induced.sum()) * pixel_km2, 2)
+    if affected_area == 0:
+        mean_uplift = 0.0
+        max_uplift = 0.0
+        notice = (
+            "Corridor falls within existing urban core or water bodies — "
+            "draw across undeveloped land to simulate sprawl uplift."
+        )
+    else:
+        mean_uplift = float(prob_uplift[meaningful].mean() * 100.0)
+        max_uplift = float(prob_uplift.max() * 100.0)
+        notice = None
+    _labeled, induced_patches = label(induced)
+    del _labeled
+
+    def _band_mean(lo: float, hi: float) -> float:
+        band = corridor_zone & (road_dist_m >= lo) & (road_dist_m < hi)
+        if not band.any():
+            return 0.0
+        return float(prob_uplift[band].mean() * 100.0)
+
+    road_on = road_mask == 1
+    logger.info(
+        "[Simulate] xgb=%s features=%d orig_dist min/median/max=%.1f/%.1f/%.1f "
+        "road_dist min/median/max=%.1f/%.1f/%.1f on-road max=%.1f "
+        "uplift%% 0-100m=%.2f 100-500m=%.2f 500-1500m=%.2f diffused=%s water=%s",
+        xgb_file,
+        len(feature_names),
+        float(orig_dist.min()),
+        float(np.median(orig_dist)),
+        float(orig_dist.max()),
+        float(road_dist_m.min()),
+        float(np.median(road_dist_m)),
+        float(road_dist_m.max()),
+        float(road_dist_m[road_on].max()) if road_on.any() else -1.0,
+        _band_mean(0, 100),
+        _band_mean(100, 500),
+        _band_mean(500, 1500),
+        diffused,
+        water_note,
     )
-
-    delta = round(updated_p_urban - payload.baseline_p_urban, 6)
-    delta_ring = _buffer_road_coords(raw_coords, buffer_deg=0.012)
-    feature = {
-        "type": "Feature",
-        "id": "simulation_road_delta",
-        "properties": {
-            "name": "Simulated Growth Corridor (What-If Delta)",
-            "corridor": "Proposed Road Infrastructure Corridor",
-            "delta_p_urban": delta,
-            "updated_p_urban": round(updated_p_urban, 6),
-            "affected_area_cells": affected_cells,
-            "influence_radius_cells": round(3.0 * _ROAD_INFLUENCE_SIGMA, 2),
-            "road_pixel_count": road_pixel_count,
-        },
-        "geometry": {
-            "type": "Polygon",
-            "coordinates": [delta_ring] if delta_ring else [],
-        },
+    overlay = uplift_to_mapbox_overlay(categories, transform, crs)
+    length_km = round(length_m / 1000.0, 2)
+    logs = [
+        f"xgboost: {xgb_file} ({len(feature_names)} features)",
+        f"road length: {length_km} km in {crs}",
+        (
+            f"orig_dist_m min/median/max: {float(orig_dist.min()):.1f} / "
+            f"{float(np.median(orig_dist)):.1f} / {float(orig_dist.max()):.1f}"
+        ),
+        (
+            f"road_dist_m min/median/max: {float(road_dist_m.min()):.1f} / "
+            f"{float(np.median(road_dist_m)):.1f} / {float(road_dist_m.max()):.1f}"
+        ),
+        f"model uplift within 60m share: {share_60:.2f}; ca_diffusion: {diffused}",
+        (
+            f"uplift% 0-100m={_band_mean(0, 100):.2f} "
+            f"100-500m={_band_mean(100, 500):.2f} "
+            f"500-1500m={_band_mean(500, 1500):.2f}"
+        ),
+        f"water: {water_note}",
+        f"grid: {height} x {width}",
+    ]
+    payload_out = {
+        "corridor_length_km": length_km,
+        "affected_area_km2": affected_area,
+        "induced_urban_km2": induced_area,
+        "mean_uplift_pct": round(mean_uplift, 1),
+        "max_uplift_pct": round(max_uplift, 1),
+        "induced_patches": int(induced_patches),
+        "road_pixel_count": int(road_mask.sum()),
+        "coordinates": overlay["coordinates"],
+        "image_url": overlay["image_url"],
+        "low_color": overlay["low_color"],
+        "mid_color": overlay["mid_color"],
+        "high_color": overlay["high_color"],
+        "baseline_swatch": "#9A5B13",
+        "logs": logs,
     }
-    features_list = [feature] if delta_ring else []
-    fc = {
-        "type": "FeatureCollection",
-        "features": features_list,
-    }
-
-    return SimulateRoadResponse(
-        type="FeatureCollection",
-        features=features_list,
-        updated_p_urban=round(updated_p_urban, 6),
-        delta_p_urban=delta,
-        affected_area_cells=affected_cells,
-        influence_radius_cells=round(3.0 * _ROAD_INFLUENCE_SIGMA, 2),
-        road_pixel_count=road_pixel_count,
-        grid_shape=[H, W],
-        dist_roads_stats={
-            "min_cells": round(float(dist_field.min()), 4),
-            "max_cells": round(float(dist_field.max()), 4),
-            "mean_cells": round(float(dist_field.mean()), 4),
-        },
-        geojson=fc,
-    )
+    if notice:
+        payload_out["notice"] = notice
+    return payload_out
 
 
 # ---------------------------------------------------------------------------

@@ -31,9 +31,9 @@ export const getHistory = (year) =>
 /** CDX Point 3 – Fetch Markov demand matrix */
 export const getDemand = () => api.get("/demand");
 
-/** What-If Sandbox – Simulate a new road */
+/** What-If Sandbox – full-grid road uplift overlay. The first call may build the 2030 baseline. */
 export const postSimulateRoad = (payload) =>
-  api.post("/simulate_road", payload);
+  api.post("/simulate_road", payload, { timeout: 300_000 });
 
 /** Health check */
 export const getHealth = () =>
